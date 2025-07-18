@@ -1,0 +1,68 @@
+{
+  "project_info": {
+    "project_number": "4143079453",
+    "project_id": "swcaiagent007",
+    "storage_bucket": "swcaiagent007.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:4143079453:android:c562b58a4de24cf7d266f4",
+        "android_client_info": {
+          "package_name": "com.swcaiagent.studywithcharles"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "4143079453-f9pehhocrd5vf895fdbvppte3c5chdos.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAk9isJVBkWkExDmjAM9kvlqB7fEKNrVPU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "4143079453-f9pehhocrd5vf895fdbvppte3c5chdos.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:4143079453:android:7abb426908280ba9d266f4",
+        "android_client_info": {
+          "package_name": "com.yourcompany.studywithcharles"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "4143079453-f9pehhocrd5vf895fdbvppte3c5chdos.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAk9isJVBkWkExDmjAM9kvlqB7fEKNrVPU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "4143079453-f9pehhocrd5vf895fdbvppte3c5chdos.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
