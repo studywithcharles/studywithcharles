@@ -10,12 +10,13 @@ class AuthService {
   final fb_auth.FirebaseAuth _auth = fb_auth.FirebaseAuth.instance;
   final SupabaseClient _supabase = Supabase.instance.client;
 
+  /// Sign up in Firebase and mirror the user row in Supabase.
   Future<fb_auth.User> signUp({
     required String email,
     required String password,
     required String name,
   }) async {
-    // 1️⃣ Create user in Firebase
+    // 1️⃣ Create in Firebase
     final cred = await _auth.createUserWithEmailAndPassword(
       email: email,
       password: password,
@@ -23,16 +24,17 @@ class AuthService {
     final fb_auth.User user = cred.user!;
     await user.updateDisplayName(name);
 
-    // 2️⃣ Mirror the user in Supabase
+    // 2️⃣ Mirror in Supabase
     try {
-      await _supabase
-          .from('users')
-          .insert({'id': user.uid, 'email': user.email, 'name': name})
-          .select()
-          .maybeSingle();
+      await _supabase.from('users').insert({
+        'id': user.uid,
+        'email': user.email,
+        'display_name': name, // ← matches your TEXT column
+      });
     } catch (e) {
+      // rollback Firebase if Supabase fails
       await user.delete();
-      throw Exception('Supabase insert failed: $e');
+      rethrow;
     }
 
     return user;
