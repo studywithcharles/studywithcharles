@@ -1,8 +1,9 @@
 // lib/features/onboarding/presentation/login_screen.dart
 
 import 'package:flutter/material.dart';
-import 'package:studywithcharles/features/home/presentation/main_screen.dart';
 import 'package:studywithcharles/shared/services/auth_service.dart';
+import 'package:studywithcharles/features/home/presentation/main_screen.dart';
+import 'signup_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   static const routeName = '/login';
@@ -24,11 +25,12 @@ class LoginScreenState extends State<LoginScreen> {
 
     try {
       await AuthService.instance.signIn(email: _email, password: _password);
-      Navigator.pushReplacementNamed(context, MainScreen.routeName);
+      // **Replace the stack with your MainScreen**
+      Navigator.of(context).pushReplacementNamed(MainScreen.routeName);
     } catch (e) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+      ).showSnackBar(SnackBar(content: Text('Log in failed: $e')));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -72,6 +74,15 @@ class LoginScreenState extends State<LoginScreen> {
                       ),
                       child: const Text('Log In'),
                     ),
+              const SizedBox(height: 12),
+              TextButton(
+                onPressed: _loading
+                    ? null
+                    : () => Navigator.of(
+                        context,
+                      ).pushReplacementNamed(SignupScreen.routeName),
+                child: const Text("Don't have an account? Sign Up"),
+              ),
             ],
           ),
         ),

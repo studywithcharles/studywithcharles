@@ -10,6 +10,7 @@ import 'package:studywithcharles/features/onboarding/presentation/welcome_screen
 import 'package:studywithcharles/features/onboarding/presentation/signup_screen.dart';
 import 'package:studywithcharles/features/onboarding/presentation/login_screen.dart';
 import 'package:studywithcharles/features/home/presentation/main_screen.dart';
+import 'package:studywithcharles/features/study/presentation/create_context_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +53,7 @@ class StudyWithCharlesApp extends StatelessWidget {
         SignupScreen.routeName: (ctx) => const SignupScreen(),
         LoginScreen.routeName: (ctx) => const LoginScreen(),
         MainScreen.routeName: (ctx) => const MainScreen(),
+        CreateContextScreen.routeName: (ctx) => const CreateContextScreen(),
       },
     );
   }

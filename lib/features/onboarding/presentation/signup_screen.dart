@@ -2,8 +2,8 @@
 
 import 'package:flutter/material.dart';
 import 'package:studywithcharles/shared/services/auth_service.dart';
+import 'package:studywithcharles/features/home/presentation/main_screen.dart';
 import 'login_screen.dart';
-import 'welcome_screen.dart';
 
 class SignupScreen extends StatefulWidget {
   static const routeName = '/signup';
@@ -14,10 +14,10 @@ class SignupScreen extends StatefulWidget {
 }
 
 class SignupScreenState extends State<SignupScreen> {
-  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
-  final TextEditingController _nameCtl = TextEditingController();
-  final TextEditingController _emailCtl = TextEditingController();
-  final TextEditingController _passwordCtl = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  final _nameCtl = TextEditingController();
+  final _emailCtl = TextEditingController();
+  final _passwordCtl = TextEditingController();
   bool _obscurePwd = true;
   bool _isLoading = false;
 
@@ -40,7 +40,8 @@ class SignupScreenState extends State<SignupScreen> {
         name: _nameCtl.text.trim(),
       );
       if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed(WelcomeScreen.routeName);
+      // **Go straight into your MainScreen tabs**
+      Navigator.of(context).pushReplacementNamed(MainScreen.routeName);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -69,28 +70,25 @@ class SignupScreenState extends State<SignupScreen> {
               TextFormField(
                 controller: _nameCtl,
                 decoration: const InputDecoration(labelText: 'Name'),
-                validator: (v) {
-                  if (v == null || v.trim().isEmpty) return 'Required';
-                  return null;
-                },
+                validator: (v) =>
+                    v == null || v.trim().isEmpty ? 'Required' : null,
               ),
               const SizedBox(height: 16),
 
               // Email
               TextFormField(
                 controller: _emailCtl,
-                keyboardType: TextInputType.emailAddress,
                 decoration: const InputDecoration(labelText: 'Email'),
+                keyboardType: TextInputType.emailAddress,
                 validator: (v) {
                   if (v == null || v.trim().isEmpty) return 'Required';
-                  final pattern = RegExp(r'^[^@]+@[^@]+\.[^@]+');
-                  if (!pattern.hasMatch(v.trim())) return 'Invalid email';
-                  return null;
+                  final re = RegExp(r'^[^@]+@[^@]+\.[^@]+');
+                  return re.hasMatch(v.trim()) ? null : 'Invalid email';
                 },
               ),
               const SizedBox(height: 16),
 
-              // Password + eye toggle
+              // Password + toggle
               TextFormField(
                 controller: _passwordCtl,
                 obscureText: _obscurePwd,
@@ -100,20 +98,17 @@ class SignupScreenState extends State<SignupScreen> {
                     icon: Icon(
                       _obscurePwd ? Icons.visibility_off : Icons.visibility,
                     ),
-                    onPressed: () {
-                      setState(() => _obscurePwd = !_obscurePwd);
-                    },
+                    onPressed: () => setState(() => _obscurePwd = !_obscurePwd),
                   ),
                 ),
                 validator: (v) {
                   if (v == null || v.isEmpty) return 'Required';
-                  if (v.length < 6) return 'Min 6 characters';
-                  return null;
+                  return v.length >= 6 ? null : 'Min 6 characters';
                 },
               ),
               const SizedBox(height: 32),
 
-              // Create Account button
+              // Create Account
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -130,17 +125,15 @@ class SignupScreenState extends State<SignupScreen> {
                       : const Text('Create Account'),
                 ),
               ),
-
               const SizedBox(height: 12),
+
+              // Go to Log In
               TextButton(
                 onPressed: _isLoading
                     ? null
-                    : () {
-                        if (!mounted) return;
-                        Navigator.of(
-                          context,
-                        ).pushReplacementNamed(LoginScreen.routeName);
-                      },
+                    : () => Navigator.of(
+                        context,
+                      ).pushReplacementNamed(LoginScreen.routeName),
                 child: const Text('Already have an account? Log In'),
               ),
             ],
