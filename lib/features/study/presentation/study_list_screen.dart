@@ -5,30 +5,117 @@ import 'package:flutter/material.dart';
 
 class StudyListScreen extends StatefulWidget {
   static const routeName = '/study';
-  const StudyListScreen({Key? key}) : super(key: key);
+  const StudyListScreen({super.key});
 
   @override
   State<StudyListScreen> createState() => _StudyListScreenState();
 }
 
 class _StudyListScreenState extends State<StudyListScreen> {
-  // 0 = Text, 1 = Diagram, 2 = Code
   int _displaySection = 0;
+  bool _rulesOpen = false;
   final PageController _pageCtrl = PageController();
   final List<Map<String, String>> _messages = [];
   final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _scroll = ScrollController();
+
+  // Context rules fields
+  final TextEditingController _titleCtl = TextEditingController();
+  String _selectedFormat = 'Summarize';
+  final TextEditingController _moreCtl = TextEditingController();
 
   @override
   void dispose() {
     _msgCtrl.dispose();
     _scroll.dispose();
     _pageCtrl.dispose();
+    _titleCtl.dispose();
+    _moreCtl.dispose();
     super.dispose();
   }
 
-  void _openContextRules() {
-    showModalBottomSheet<bool>(
+  void _openHamburgerMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: Container(
+              color: const Color.fromRGBO(255, 255, 255, 0.1),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Menu',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color.fromRGBO(0, 255, 255, 1),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ListTile(
+                    leading: const Icon(Icons.add_box, color: Colors.white70),
+                    title: const Text(
+                      'New Card',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () {
+                      /* TODO */
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.bookmark, color: Colors.white70),
+                    title: const Text(
+                      'Saved Cards',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () {
+                      /* TODO */
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.question_answer,
+                      color: Colors.white70,
+                    ),
+                    title: const Text(
+                      'FAQ',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () {
+                      /* TODO */
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.logout, color: Colors.white70),
+                    title: const Text(
+                      'Sign Out',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () {
+                      /* TODO */
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openContextRules() async {
+    setState(() => _rulesOpen = true);
+    await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
@@ -43,40 +130,124 @@ class _StudyListScreenState extends State<StudyListScreen> {
             child: Container(
               color: const Color.fromRGBO(255, 255, 255, 0.1),
               padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text(
-                    'Context RULES',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: Color.fromRGBO(0, 255, 255, 1),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Context RULES',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Color.fromRGBO(0, 255, 255, 1),
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 12),
-                  Text(
-                    'Set your course title, result format, attachments & more context here.',
-                    style: TextStyle(color: Color.fromRGBO(255, 255, 255, 0.7)),
-                  ),
-                  SizedBox(height: 16),
-                ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _titleCtl,
+                      decoration: const InputDecoration(
+                        labelText: 'Course Title',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        hintText: 'e.g. Linear Algebra',
+                        hintStyle: TextStyle(color: Colors.white54),
+                      ),
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: _selectedFormat,
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Summarize',
+                          child: Text('Summarize'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Generate Q&A',
+                          child: Text('Generate Q&A'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Code for me',
+                          child: Text('Code for me'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Solve my assignment',
+                          child: Text('Solve my assignment'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Explain topic/Question',
+                          child: Text('Explain topic/Question'),
+                        ),
+                      ],
+                      onChanged: (v) => setState(() => _selectedFormat = v!),
+                      decoration: const InputDecoration(
+                        labelText: 'Result Format',
+                        labelStyle: TextStyle(color: Colors.white70),
+                      ),
+                      dropdownColor: const Color.fromRGBO(30, 30, 30, 1),
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: () {},
+                      icon: const Icon(Icons.add, color: Colors.white70),
+                      label: const Text(
+                        'Add Attachments',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _moreCtl,
+                      decoration: const InputDecoration(
+                        labelText: 'More Context',
+                        labelStyle: TextStyle(color: Colors.white70),
+                        hintText: 'Any extra rules or constraints',
+                        hintStyle: TextStyle(color: Colors.white54),
+                      ),
+                      style: const TextStyle(color: Colors.white),
+                      maxLines: 3,
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text(
+                            'Cancel',
+                            style: TextStyle(color: Colors.white70),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        ElevatedButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.cyanAccent,
+                          ),
+                          child: const Text(
+                            'Save',
+                            style: TextStyle(color: Colors.black),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
         ),
       ),
     );
+    setState(() => _rulesOpen = false);
   }
 
-  void _sendMessage() {
-    final text = _msgCtrl.text.trim();
-    if (text.isEmpty) return;
+  void _sendMessageHandler(String text) {
+    if (text.isEmpty || !mounted) return;
     setState(() => _messages.add({'role': 'user', 'text': text}));
     _msgCtrl.clear();
-
     Future.delayed(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
       setState(
         () => _messages.add({
           'role': 'assistant',
@@ -89,7 +260,6 @@ class _StudyListScreenState extends State<StudyListScreen> {
         curve: Curves.easeOut,
       );
     });
-
     _scroll.animateTo(
       _scroll.position.maxScrollExtent + 80,
       duration: const Duration(milliseconds: 300),
@@ -105,8 +275,7 @@ class _StudyListScreenState extends State<StudyListScreen> {
           padding: const EdgeInsets.symmetric(vertical: 12),
           itemCount: _messages.length,
           itemBuilder: (_, i) {
-            final m = _messages[i];
-            final isUser = m['role'] == 'user';
+            final m = _messages[i], isUser = m['role'] == 'user';
             return Align(
               alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
               child: Padding(
@@ -168,49 +337,61 @@ class _StudyListScreenState extends State<StudyListScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.black,
       appBar: AppBar(
         automaticallyImplyLeading: false,
+        backgroundColor: Colors.black,
+        elevation: 0,
+        centerTitle: false,
         title: const Text(
-          'Study',
-          style: TextStyle(fontWeight: FontWeight.bold),
+          'Study Section',
+          style: TextStyle(fontWeight: FontWeight.w900, fontFamily: 'Roboto'),
         ),
-        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.menu),
+            color: Colors.white,
+            onPressed: _openHamburgerMenu,
+          ),
+        ],
       ),
       body: Column(
         children: [
-          // Centered segmented control + context icon
+          // ── (CENTERED) Segmented control + gear ─────────────────
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 240,
-                  decoration: BoxDecoration(
+            child: Center(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                  child: Container(
                     color: const Color.fromRGBO(255, 255, 255, 0.1),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _buildSegment('TEXT', 0),
-                      _buildSegment('DIAGRAM', 1),
-                      _buildSegment('CODE', 2),
-                    ],
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 4,
+                      horizontal: 8,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildSegment('TEXT', 0),
+                        _buildSegment('DIAGRAM', 1),
+                        _buildSegment('CODE', 2),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.settings),
+                          color: _rulesOpen ? Colors.cyanAccent : Colors.white,
+                          onPressed: _openContextRules,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(width: 12),
-                IconButton(
-                  icon: const Icon(Icons.settings),
-                  color: Colors.cyanAccent,
-                  tooltip: 'Context RULES',
-                  onPressed: _openContextRules,
-                ),
-              ],
+              ),
             ),
           ),
 
-          // Swipeable content
+          // ── PageView ────────────────────────────────────────────
           Expanded(
             child: PageView(
               controller: _pageCtrl,
@@ -223,28 +404,114 @@ class _StudyListScreenState extends State<StudyListScreen> {
             ),
           ),
 
-          // Text bar
+          // ── Bottom text bar (unchanged) ─────────────────────────
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                children: [
-                  InkWell(
-                    onTap: () {},
-                    child: const Icon(Icons.add, color: Colors.cyanAccent),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-                        child: Container(
-                          color: const Color.fromRGBO(255, 255, 255, 0.05),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                  child: Container(
+                    color: const Color.fromRGBO(255, 255, 255, 0.12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      children: [
+                        InkWell(
+                          onTap: () => showModalBottomSheet(
+                            context: context,
+                            backgroundColor: Colors.transparent,
+                            builder: (_) => ClipRRect(
+                              borderRadius: const BorderRadius.vertical(
+                                top: Radius.circular(16),
+                              ),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(
+                                  sigmaX: 10,
+                                  sigmaY: 10,
+                                ),
+                                child: Container(
+                                  color: const Color.fromRGBO(
+                                    255,
+                                    255,
+                                    255,
+                                    0.1,
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.photo_library,
+                                          color: Colors.white70,
+                                        ),
+                                        title: const Text(
+                                          'Add Photo/Video',
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                        onTap: () {
+                                          /* TODO */
+                                        },
+                                      ),
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.attach_file,
+                                          color: Colors.white70,
+                                        ),
+                                        title: const Text(
+                                          'Attach File',
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                        onTap: () {
+                                          /* TODO */
+                                        },
+                                      ),
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.camera_alt,
+                                          color: Colors.white70,
+                                        ),
+                                        title: const Text(
+                                          'Take Photo',
+                                          style: TextStyle(color: Colors.white),
+                                        ),
+                                        onTap: () {
+                                          /* TODO */
+                                        },
+                                      ),
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.save,
+                                          color: Colors.cyanAccent,
+                                        ),
+                                        title: const Text(
+                                          'SAVE THIS CARD',
+                                          style: TextStyle(
+                                            color: Colors.cyanAccent,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 16,
+                                          ),
+                                        ),
+                                        onTap: () {
+                                          /* TODO */
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
                           ),
+                          child: const Icon(
+                            Icons.add,
+                            color: Colors.cyanAccent,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
                           child: TextField(
                             controller: _msgCtrl,
                             decoration: const InputDecoration(
@@ -254,35 +521,23 @@ class _StudyListScreenState extends State<StudyListScreen> {
                                 color: Color.fromRGBO(255, 255, 255, 0.5),
                               ),
                             ),
-                            onSubmitted: (_) => _sendMessage(),
-                            style: const TextStyle(
-                              color: Color.fromRGBO(255, 255, 255, 1),
-                            ),
+                            onSubmitted: _sendMessageHandler,
+                            style: const TextStyle(color: Colors.white),
                           ),
                         ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: _sendMessage,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: BackdropFilter(
-                        filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-                        child: Container(
-                          color: const Color.fromRGBO(255, 255, 255, 0.05),
-                          padding: const EdgeInsets.all(12),
+                        const SizedBox(width: 8),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(24),
+                          onTap: () => _sendMessageHandler(_msgCtrl.text),
                           child: const Icon(
                             Icons.send_rounded,
                             color: Colors.cyanAccent,
                           ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
-                ],
+                ),
               ),
             ),
           ),

@@ -5,7 +5,7 @@ import 'package:studywithcharles/features/study/presentation/study_list_screen.d
 
 class MainScreen extends StatefulWidget {
   static const routeName = '/';
-  const MainScreen({Key? key}) : super(key: key);
+  const MainScreen({super.key});
 
   @override
   MainScreenState createState() => MainScreenState();
