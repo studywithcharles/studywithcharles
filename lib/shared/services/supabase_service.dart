@@ -1,56 +1,58 @@
 // lib/shared/services/supabase_service.dart
 
+import 'package:uuid/uuid.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'supabase_client.dart'; // adjust path if needed
+import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
 
-/// High‑level Supabase API service for your app’s features.
 class SupabaseService {
   SupabaseService._();
   static final SupabaseService instance = SupabaseService._();
 
-  final SupabaseClient _supabase = SupabaseClientWrapper.instance.client;
+  final SupabaseClient _supabase = Supabase.instance.client;
+  final Uuid _uuid = const Uuid();
 
   // ─── CONTEXTS ────────────────────────────────────────────────────────────────
 
-  /// Inserts a new study context and returns the inserted row.
-  Future<Map<String, dynamic>> createContext({
+  /// Creates a new context and returns its generated UUID.
+  Future<String> createContext({
     required String title,
     required String resultFormat,
     String? moreContext,
   }) async {
-    final userId = _supabase.auth.currentUser!.id;
-    final rows =
-        await _supabase.from('contexts').insert({
-              'id': userId, // or generate your own UUID string
-              'user_id': userId,
-              'title': title,
-              'result_format': resultFormat,
-              'more_context': moreContext,
-            }).select()
-            as List<dynamic>;
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+    final userId = firebaseUser.uid;
 
-    return Map<String, dynamic>.from(rows.first as Map);
+    final newId = _uuid.v4();
+    final inserted = await _supabase
+        .from('contexts')
+        .insert({
+          'id': newId,
+          'user_id': userId,
+          'title': title,
+          'result_format': resultFormat,
+          'more_context': moreContext,
+        })
+        .select('id')
+        .single();
+    return inserted['id'] as String;
   }
 
-  /// Fetches all contexts for the current user, newest first.
   Future<List<Map<String, dynamic>>> fetchContexts() async {
-    final userId = _supabase.auth.currentUser!.id;
-    final rows = await _supabase.from('contexts').select() as List<dynamic>;
-    // filter and sort client‑side if needed, or apply eq / order in the query:
-    final filtered =
-        rows
-            .cast<Map<String, dynamic>>()
-            .where((c) => c['user_id'] == userId)
-            .toList()
-          ..sort(
-            (a, b) => (b['created_at'] as String).compareTo(
-              a['created_at'] as String,
-            ),
-          );
-    return filtered;
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) return [];
+    final userId = firebaseUser.uid;
+
+    final rows = await _supabase
+        .from('contexts')
+        .select()
+        .eq('user_id', userId)
+        .order('created_at', ascending: false);
+    return List<Map<String, dynamic>>.from(rows as List);
   }
 
-  /// Updates an existing context by its ID and returns the updated row.
   Future<Map<String, dynamic>> updateContext({
     required String id,
     String? title,
@@ -62,13 +64,16 @@ class SupabaseService {
     if (resultFormat != null) updates['result_format'] = resultFormat;
     if (moreContext != null) updates['more_context'] = moreContext;
 
-    final rows =
-        await _supabase.from('contexts').update(updates).eq('id', id).select()
-            as List<dynamic>;
-    return Map<String, dynamic>.from(rows.first as Map);
+    final row = await _supabase
+        .from('contexts')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .maybeSingle();
+    if (row == null) throw Exception('Context not found');
+    return Map<String, dynamic>.from(row as Map);
   }
 
-  /// Deletes a context by its ID.
   Future<void> deleteContext(String id) async {
     await _supabase.from('contexts').delete().eq('id', id);
   }
@@ -80,29 +85,74 @@ class SupabaseService {
     required Map<String, dynamic> content,
     required String type,
   }) async {
-    final userId = _supabase.auth.currentUser!.id;
-    final rows =
-        await _supabase.from('cards').insert({
-              'id': userId,
-              'context_id': contextId,
-              'user_id': userId,
-              'content': content,
-              'type': type,
-            }).select()
-            as List<dynamic>;
-    return Map<String, dynamic>.from(rows.first as Map);
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+    final userId = firebaseUser.uid;
+
+    final newId = _uuid.v4();
+    final row = await _supabase
+        .from('cards')
+        .insert({
+          'id': newId,
+          'context_id': contextId,
+          'user_id': userId,
+          'content': content,
+          'type': type,
+        })
+        .select()
+        .single();
+    return Map<String, dynamic>.from(row as Map);
   }
 
   Future<List<Map<String, dynamic>>> fetchCards(String contextId) async {
-    final rows = await _supabase.from('cards').select() as List<dynamic>;
-    return rows
-        .cast<Map<String, dynamic>>()
-        .where((c) => c['context_id'] == contextId)
-        .toList()
-      ..sort(
-        (a, b) =>
-            (b['created_at'] as String).compareTo(a['created_at'] as String),
-      );
+    final rows = await _supabase
+        .from('cards')
+        .select()
+        .eq('context_id', contextId)
+        .order('created_at', ascending: false);
+    return List<Map<String, dynamic>>.from(rows as List);
+  }
+
+  /// Count how many cards the user has saved since [since].
+  Future<int> countSavedCardsSince({
+    required String contextId,
+    required DateTime since,
+  }) async {
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+    final userId = firebaseUser.uid;
+
+    final rows = await _supabase
+        .from('cards')
+        .select()
+        .eq('context_id', contextId)
+        .eq('user_id', userId)
+        .eq('saved', true)
+        .gte('saved_at', since.toIso8601String());
+    return (rows as List).length;
+  }
+
+  /// Saves a card (marks it saved + timestamp).
+  Future<void> saveCard({
+    required String contextId,
+    required Map<String, dynamic> content,
+  }) async {
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+    final userId = firebaseUser.uid;
+
+    await _supabase.from('cards').insert({
+      'id': _uuid.v4(),
+      'context_id': contextId,
+      'user_id': userId,
+      'content': content,
+      'type': content['type'] ?? 'text',
+      'saved': true,
+      'saved_at': DateTime.now().toIso8601String(),
+    });
   }
 
   // ─── EVENTS ──────────────────────────────────────────────────────────────────
@@ -114,34 +164,39 @@ class SupabaseService {
     required DateTime startTime,
     required DateTime endTime,
   }) async {
-    final userId = _supabase.auth.currentUser!.id;
-    final rows =
-        await _supabase.from('events').insert({
-              'id': userId,
-              'user_id': userId,
-              'group_id': groupId,
-              'title': title,
-              'description': description,
-              'start_time': startTime.toIso8601String(),
-              'end_time': endTime.toIso8601String(),
-            }).select()
-            as List<dynamic>;
-    return Map<String, dynamic>.from(rows.first as Map);
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+    final userId = firebaseUser.uid;
+
+    final newId = _uuid.v4();
+    final row = await _supabase
+        .from('events')
+        .insert({
+          'id': newId,
+          'user_id': userId,
+          'group_id': groupId,
+          'title': title,
+          'description': description,
+          'start_time': startTime.toIso8601String(),
+          'end_time': endTime.toIso8601String(),
+        })
+        .select()
+        .single();
+    return Map<String, dynamic>.from(row as Map);
   }
 
   Future<List<Map<String, dynamic>>> fetchEvents(String groupId) async {
-    final userId = _supabase.auth.currentUser!.id;
-    final rows = await _supabase.from('events').select() as List<dynamic>;
-    return rows
-        .cast<Map<String, dynamic>>()
-        .where((e) => e['group_id'] == groupId || e['user_id'] == userId)
-        .toList()
-      ..sort(
-        (a, b) =>
-            (a['start_time'] as String).compareTo(b['start_time'] as String),
-      );
-  }
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) return [];
+    final userId = firebaseUser.uid;
 
-  // ─── MORE FEATURES ──────────────────────────────────────────────────────────
-  // Add update/delete for cards, events, TCA, etc., following the same pattern.
+    final rows = await _supabase
+        .from('events')
+        .select()
+        .or('group_id.eq.$groupId,user_id.eq.$userId')
+        .order('start_time', ascending: true);
+    return List<Map<String, dynamic>>.from(rows as List);
+  }
 }
