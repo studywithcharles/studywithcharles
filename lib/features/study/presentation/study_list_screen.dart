@@ -1,7 +1,12 @@
 // lib/features/study/presentation/study_list_screen.dart
 
+import 'dart:convert';
+import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' as http;
+import 'package:studywithcharles/shared/services/auth_service.dart';
 import 'package:studywithcharles/shared/services/supabase_service.dart';
 
 class StudyListScreen extends StatefulWidget {
@@ -18,6 +23,7 @@ class _StudyListScreenState extends State<StudyListScreen> {
   String? _currentContextId;
 
   bool _isLoading = true;
+  List<Map<String, dynamic>> _savedContexts = [];
 
   final PageController _pageCtrl = PageController();
   final List<Map<String, String>> _messages = [];
@@ -39,8 +45,10 @@ class _StudyListScreenState extends State<StudyListScreen> {
     setState(() => _isLoading = true);
     try {
       final contexts = await SupabaseService.instance.fetchContexts();
+      _savedContexts = contexts;
       if (contexts.isNotEmpty) {
-        _currentContextId = contexts.first['id'] as String;
+        final first = contexts.first;
+        _currentContextId = first['id'] as String;
         final cards = await SupabaseService.instance.fetchCards(
           _currentContextId!,
         );
@@ -93,7 +101,7 @@ class _StudyListScreenState extends State<StudyListScreen> {
     );
   }
 
-  // ☰ Main hamburger menu
+  // ── Main hamburger menu ─────────────────────────────────────────────────
   void _openHamburgerMenu() {
     showModalBottomSheet(
       context: context,
@@ -121,16 +129,27 @@ class _StudyListScreenState extends State<StudyListScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
+
+                  // New Card
                   ListTile(
-                    leading: const Icon(Icons.add_box, color: Colors.white70),
+                    leading: const Icon(
+                      Icons.add_circle_outline,
+                      color: Colors.white70,
+                    ),
                     title: const Text(
                       'New Card',
                       style: TextStyle(color: Colors.white),
                     ),
                     onTap: () {
-                      /* TODO */
+                      setState(() {
+                        _currentContextId = null;
+                        _messages.clear();
+                      });
+                      Navigator.of(context).pop();
                     },
                   ),
+
+                  // Saved Cards
                   ListTile(
                     leading: const Icon(Icons.bookmark, color: Colors.white70),
                     title: const Text(
@@ -138,9 +157,12 @@ class _StudyListScreenState extends State<StudyListScreen> {
                       style: TextStyle(color: Colors.white),
                     ),
                     onTap: () {
-                      /* TODO */
+                      Navigator.of(context).pop();
+                      _openSavedCardsList();
                     },
                   ),
+
+                  // FAQ
                   ListTile(
                     leading: const Icon(
                       Icons.question_answer,
@@ -151,17 +173,20 @@ class _StudyListScreenState extends State<StudyListScreen> {
                       style: TextStyle(color: Colors.white),
                     ),
                     onTap: () {
-                      /* TODO */
+                      _showGlassSnackBar('FAQ not implemented yet');
                     },
                   ),
+
+                  // Sign Out
                   ListTile(
                     leading: const Icon(Icons.logout, color: Colors.white70),
                     title: const Text(
                       'Sign Out',
                       style: TextStyle(color: Colors.white),
                     ),
-                    onTap: () {
-                      /* TODO */
+                    onTap: () async {
+                      await AuthService.instance.signOut();
+                      Navigator.of(context).pushReplacementNamed('/login');
                     },
                   ),
                 ],
@@ -173,7 +198,73 @@ class _StudyListScreenState extends State<StudyListScreen> {
     );
   }
 
-  // ➕ Card-actions menu (attached to plus icon)
+  // ── Show saved contexts ─────────────────────────────────────────────────
+  void _openSavedCardsList() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: Container(
+              color: const Color.fromRGBO(255, 255, 255, 0.1),
+              padding: const EdgeInsets.all(16),
+              child: _savedContexts.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No saved cards.',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    )
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: _savedContexts.map((ctx) {
+                        final id = ctx['id'] as String;
+                        final title = ctx['title'] as String;
+                        return ListTile(
+                          title: Text(
+                            title,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          onTap: () async {
+                            Navigator.of(context).pop();
+                            setState(() => _isLoading = true);
+                            _currentContextId = id;
+                            _messages.clear();
+                            final cards = await SupabaseService.instance
+                                .fetchCards(id);
+                            for (var row in cards) {
+                              final content =
+                                  row['content'] as Map<String, dynamic>;
+                              _messages.add({
+                                'role': content['role'] as String,
+                                'text': content['text'] as String,
+                              });
+                            }
+                            setState(() => _isLoading = false);
+                          },
+                          onLongPress: () async {
+                            await SupabaseService.instance.deleteContext(id);
+                            _showGlassSnackBar('Deleted "$title"');
+                            Navigator.of(context).pop();
+                            _loadInitialData();
+                          },
+                        );
+                      }).toList(),
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Card-actions menu ───────────────────────────────────────────────────
   void _openCardActionsMenu() {
     showModalBottomSheet(
       context: context,
@@ -201,10 +292,51 @@ class _StudyListScreenState extends State<StudyListScreen> {
                       'Add Photo/Video',
                       style: TextStyle(color: Colors.white),
                     ),
-                    onTap: () {
-                      /* TODO */
+                    onTap: () async {
+                      Navigator.of(context).pop();
+                      final file = await _pickImage(ImageSource.gallery);
+                      if (file != null) {
+                        _showGlassSnackBar('Uploading…');
+                        final url = await SupabaseService.instance
+                            .uploadAttachment(file);
+                        _showGlassSnackBar('Uploaded');
+                        setState(() {
+                          _messages.add({
+                            'role': 'assistant',
+                            'text': '[Image]($url)',
+                          });
+                        });
+                      }
                     },
                   ),
+
+                  ListTile(
+                    leading: const Icon(
+                      Icons.camera_alt,
+                      color: Colors.white70,
+                    ),
+                    title: const Text(
+                      'Take Photo',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () async {
+                      Navigator.of(context).pop();
+                      final file = await _pickImage(ImageSource.camera);
+                      if (file != null) {
+                        _showGlassSnackBar('Uploading…');
+                        final url = await SupabaseService.instance
+                            .uploadAttachment(file);
+                        _showGlassSnackBar('Uploaded');
+                        setState(() {
+                          _messages.add({
+                            'role': 'assistant',
+                            'text': '[Photo]($url)',
+                          });
+                        });
+                      }
+                    },
+                  ),
+
                   ListTile(
                     leading: const Icon(
                       Icons.attach_file,
@@ -215,22 +347,11 @@ class _StudyListScreenState extends State<StudyListScreen> {
                       style: TextStyle(color: Colors.white),
                     ),
                     onTap: () {
-                      /* TODO */
+                      Navigator.of(context).pop();
+                      _showGlassSnackBar('File picker not implemented');
                     },
                   ),
-                  ListTile(
-                    leading: const Icon(
-                      Icons.camera_alt,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Take Photo',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    onTap: () {
-                      /* TODO */
-                    },
-                  ),
+
                   ListTile(
                     leading: const Icon(Icons.save, color: Colors.cyanAccent),
                     title: const Text(
@@ -255,12 +376,18 @@ class _StudyListScreenState extends State<StudyListScreen> {
     );
   }
 
+  Future<File?> _pickImage(ImageSource src) async {
+    final XFile? picked = await ImagePicker().pickImage(
+      source: src,
+      imageQuality: 80,
+    );
+    return picked == null ? null : File(picked.path);
+  }
+
   Future<void> _saveCurrentCard() async {
     if (_currentContextId == null || _messages.isEmpty) return;
-
     final now = DateTime.now();
     final startOfMonth = DateTime(now.year, now.month, 1);
-
     final savedCount = await SupabaseService.instance.countSavedCardsSince(
       contextId: _currentContextId!,
       since: startOfMonth,
@@ -272,21 +399,21 @@ class _StudyListScreenState extends State<StudyListScreen> {
       );
       return;
     }
-
     try {
       await SupabaseService.instance.saveCard(
         contextId: _currentContextId!,
         content: _messages.last,
       );
       _showGlassSnackBar('Card saved! 🎉');
+      _loadInitialData();
     } catch (e) {
       _showGlassSnackBar('Error saving card: $e', isError: true);
     }
   }
 
+  // ── Context rules popup ─────────────────────────────────────────────────
   void _openContextRules() async {
     setState(() => _rulesOpen = true);
-
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -433,17 +560,16 @@ class _StudyListScreenState extends State<StudyListScreen> {
         ),
       ),
     );
-
     setState(() => _rulesOpen = false);
   }
 
+  // ── Send handler ─────────────────────────────────────────────────────────
   Future<void> _sendMessageHandler(String text) async {
     if (text.isEmpty || !mounted) return;
     if (_currentContextId == null) {
       _openContextRules();
       return;
     }
-
     setState(() => _messages.add({'role': 'user', 'text': text}));
     _msgCtrl.clear();
     await SupabaseService.instance.createCard(
@@ -456,7 +582,10 @@ class _StudyListScreenState extends State<StudyListScreen> {
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOut,
     );
-
+    if (_displaySection == 1) {
+      // diagram tab: FutureBuilder handles it
+    }
+    // simulate AI reply
     await Future.delayed(const Duration(milliseconds: 500));
     if (!mounted) return;
     setState(
@@ -477,6 +606,30 @@ class _StudyListScreenState extends State<StudyListScreen> {
     );
   }
 
+  Future<String> _generateDiagram(String prompt) async {
+    final apiKey = 'YOUR_GEMINI_API_KEY';
+    final uri = Uri.parse('https://gemini.googleapis.com/v1/images:generate');
+    final res = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $apiKey',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'prompt': prompt,
+        'model': 'gemini-pro-v1',
+        'imageCount': 1,
+        'size': '512x512',
+      }),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Gemini error ${res.statusCode}');
+    }
+    final data = jsonDecode(res.body);
+    return (data['images'] as List).first['url'] as String;
+  }
+
+  // ── Build ─────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -499,7 +652,7 @@ class _StudyListScreenState extends State<StudyListScreen> {
       ),
       body: Column(
         children: [
-          // Segmented control + gear icon
+          // segmented + settings
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Center(
@@ -533,7 +686,7 @@ class _StudyListScreenState extends State<StudyListScreen> {
             ),
           ),
 
-          // PageView (with loading & empty states inside first tab)
+          // PageView
           Expanded(
             child: PageView(
               controller: _pageCtrl,
@@ -546,7 +699,7 @@ class _StudyListScreenState extends State<StudyListScreen> {
             ),
           ),
 
-          // Bottom input + plus menu
+          // bottom input + plus
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -651,31 +804,40 @@ class _StudyListScreenState extends State<StudyListScreen> {
           );
         },
       );
-    } else if (section == 1) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: const [
-            Icon(Icons.image, size: 80, color: Colors.white54),
-            SizedBox(height: 12),
-            Text('Diagram Output', style: TextStyle(color: Colors.white70)),
-          ],
-        ),
-      );
-    } else {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(16),
-        color: const Color.fromRGBO(30, 30, 30, 1),
-        child: const Text(
-          '// Your generated code will appear here',
-          style: TextStyle(
-            fontFamily: 'SourceCodePro',
-            color: Colors.greenAccent,
-          ),
-        ),
+    }
+    if (section == 1) {
+      return FutureBuilder<String>(
+        future: _generateDiagram(_messages.map((m) => m['text']).join('\n')),
+        builder: (ctx, snap) {
+          if (snap.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError) {
+            return Center(
+              child: Text(
+                'Error: ${snap.error}',
+                style: const TextStyle(color: Colors.red),
+              ),
+            );
+          }
+          final imageUrl = snap.data!;
+          return Center(child: Image.network(imageUrl, fit: BoxFit.contain));
+        },
       );
     }
+    // CODE tab
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      color: const Color.fromRGBO(30, 30, 30, 1),
+      child: const Text(
+        '// Your generated code will appear here',
+        style: TextStyle(
+          fontFamily: 'SourceCodePro',
+          color: Colors.greenAccent,
+        ),
+      ),
+    );
   }
 
   Widget _buildSegment(String label, int idx) {

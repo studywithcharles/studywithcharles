@@ -2,6 +2,10 @@
 
 import 'package:flutter/material.dart';
 import 'package:studywithcharles/features/study/presentation/study_list_screen.dart';
+import 'package:studywithcharles/features/timetable/presentation/timetable_screen.dart';
+import 'package:studywithcharles/features/love/presentation/love_screen.dart';
+import 'package:studywithcharles/features/pricing/presentation/pricing_screen.dart'; // ← new
+import 'package:studywithcharles/features/profile/presentation/profile_screen.dart'; // ← new
 
 class MainScreen extends StatefulWidget {
   static const routeName = '/';
@@ -14,19 +18,17 @@ class MainScreen extends StatefulWidget {
 class MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
-  // Keep all five tabs; replace Centers with your real screens as you build them
   static const List<Widget> _tabs = [
     StudyListScreen(),
-    Center(child: Text('Timetable Screen')),
-    Center(child: Text('Love Section')),
-    Center(child: Text('Pricing')),
-    Center(child: Text('Profile')),
+    TimetableScreen(),
+    LoveSectionScreen(),
+    PricingScreen(), // ← now real screen
+    ProfileScreen(), // ← now real screen
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // We let StudyListScreen draw its own AppBar for the Study tab
       body: _tabs[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,

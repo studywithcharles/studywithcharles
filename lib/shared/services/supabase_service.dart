@@ -1,5 +1,6 @@
 // lib/shared/services/supabase_service.dart
 
+import 'dart:io';
 import 'package:uuid/uuid.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
@@ -11,9 +12,18 @@ class SupabaseService {
   final SupabaseClient _supabase = Supabase.instance.client;
   final Uuid _uuid = const Uuid();
 
-  // ─── CONTEXTS ────────────────────────────────────────────────────────────────
+  // ─── USER PROFILE ───────────────────────────────────────────────────────────
+  /// Fetches a single user row (including timetable_code) from the 'users' table.
+  Future<Map<String, dynamic>> fetchUserProfile(String userId) async {
+    final row = await _supabase
+        .from('users')
+        .select()
+        .eq('id', userId)
+        .single();
+    return Map<String, dynamic>.from(row as Map);
+  }
 
-  /// Creates a new context and returns its generated UUID.
+  // ─── CONTEXTS ────────────────────────────────────────────────────────────────
   Future<String> createContext({
     required String title,
     required String resultFormat,
@@ -22,14 +32,13 @@ class SupabaseService {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
-    final userId = firebaseUser.uid;
 
     final newId = _uuid.v4();
     final inserted = await _supabase
         .from('contexts')
         .insert({
           'id': newId,
-          'user_id': userId,
+          'user_id': firebaseUser.uid,
           'title': title,
           'result_format': resultFormat,
           'more_context': moreContext,
@@ -43,12 +52,11 @@ class SupabaseService {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) return [];
-    final userId = firebaseUser.uid;
 
     final rows = await _supabase
         .from('contexts')
         .select()
-        .eq('user_id', userId)
+        .eq('user_id', firebaseUser.uid)
         .order('created_at', ascending: false);
     return List<Map<String, dynamic>>.from(rows as List);
   }
@@ -79,7 +87,6 @@ class SupabaseService {
   }
 
   // ─── CARDS ───────────────────────────────────────────────────────────────────
-
   Future<Map<String, dynamic>> createCard({
     required String contextId,
     required Map<String, dynamic> content,
@@ -88,7 +95,6 @@ class SupabaseService {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
-    final userId = firebaseUser.uid;
 
     final newId = _uuid.v4();
     final row = await _supabase
@@ -96,7 +102,7 @@ class SupabaseService {
         .insert({
           'id': newId,
           'context_id': contextId,
-          'user_id': userId,
+          'user_id': firebaseUser.uid,
           'content': content,
           'type': type,
         })
@@ -114,7 +120,6 @@ class SupabaseService {
     return List<Map<String, dynamic>>.from(rows as List);
   }
 
-  /// Count how many cards the user has saved since [since].
   Future<int> countSavedCardsSince({
     required String contextId,
     required DateTime since,
@@ -122,19 +127,17 @@ class SupabaseService {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
-    final userId = firebaseUser.uid;
 
     final rows = await _supabase
         .from('cards')
         .select()
         .eq('context_id', contextId)
-        .eq('user_id', userId)
+        .eq('user_id', firebaseUser.uid)
         .eq('saved', true)
         .gte('saved_at', since.toIso8601String());
     return (rows as List).length;
   }
 
-  /// Saves a card (marks it saved + timestamp).
   Future<void> saveCard({
     required String contextId,
     required Map<String, dynamic> content,
@@ -142,12 +145,11 @@ class SupabaseService {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
-    final userId = firebaseUser.uid;
 
     await _supabase.from('cards').insert({
       'id': _uuid.v4(),
       'context_id': contextId,
-      'user_id': userId,
+      'user_id': firebaseUser.uid,
       'content': content,
       'type': content['type'] ?? 'text',
       'saved': true,
@@ -155,31 +157,39 @@ class SupabaseService {
     });
   }
 
-  // ─── EVENTS ──────────────────────────────────────────────────────────────────
+  // ─── ATTACHMENTS ────────────────────────────────────────────────────────────
+  Future<String> uploadAttachment(File file) async {
+    final ext = file.path.split('.').last;
+    final path = 'attachments/${_uuid.v4()}.$ext';
+    await _supabase.storage.from('event-images').upload(path, file);
+    return _supabase.storage.from('event-images').getPublicUrl(path);
+  }
 
+  // ─── EVENTS ──────────────────────────────────────────────────────────────────
   Future<Map<String, dynamic>> createEvent({
     required String groupId,
     required String title,
     String? description,
     required DateTime startTime,
     required DateTime endTime,
+    String? repeatRule,
   }) async {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
-    final userId = firebaseUser.uid;
 
     final newId = _uuid.v4();
     final row = await _supabase
         .from('events')
         .insert({
           'id': newId,
-          'user_id': userId,
+          'user_id': firebaseUser.uid,
           'group_id': groupId,
           'title': title,
           'description': description,
           'start_time': startTime.toIso8601String(),
           'end_time': endTime.toIso8601String(),
+          // 'repeat_rule': repeatRule, // <-- REMOVED: This column does not exist in the 'events' table
         })
         .select()
         .single();
@@ -190,12 +200,11 @@ class SupabaseService {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) return [];
-    final userId = firebaseUser.uid;
 
     final rows = await _supabase
         .from('events')
         .select()
-        .or('group_id.eq.$groupId,user_id.eq.$userId')
+        .or('group_id.eq.$groupId,user_id.eq.${firebaseUser.uid}')
         .order('start_time', ascending: true);
     return List<Map<String, dynamic>>.from(rows as List);
   }
