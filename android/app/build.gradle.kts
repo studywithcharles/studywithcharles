@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.yourcompany.studywithcharles"
+    namespace = "com.swcaiagent.studywithcharles"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "27.0.12077973"
 
@@ -20,7 +20,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.yourcompany.studywithcharles"
+        applicationId = "com.swcaiagent.studywithcharles"
         minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

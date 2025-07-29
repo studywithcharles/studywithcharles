@@ -1,4 +1,4 @@
-package com.yourcompany.studywithcharles;
+package com.swcaiagent.studywithcharles;
 
 import io.flutter.embedding.android.FlutterActivity;
 

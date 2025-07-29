@@ -1,0 +1,33 @@
+
+[functions.start-nomination-cycle]
+enabled = true
+verify_jwt = true
+import_map = "./functions/start-nomination-cycle/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/start-nomination-cycle/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/start-nomination-cycle/*.html" ]
+
+[functions.scrape-nominations]
+enabled = true
+verify_jwt = true
+import_map = "./functions/scrape-nominations/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/scrape-nominations/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/scrape-nominations/*.html" ]
+
+[functions.select-nominees]
+enabled = true
+verify_jwt = true
+import_map = "./functions/select-nominees/deno.json"
+# Uncomment to specify a custom file path to the entrypoint.
+# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
+entrypoint = "./functions/select-nominees/index.ts"
+# Specifies static files to be bundled with the function. Supports glob patterns.
+# For example, if you want to serve static HTML pages in your function:
+# static_files = [ "./functions/select-nominees/*.html" ]
