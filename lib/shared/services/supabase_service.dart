@@ -11,13 +11,17 @@ class SupabaseService {
   final SupabaseClient supabase = Supabase.instance.client;
   final Uuid uuid = const Uuid();
 
-  // USER PROFILE
+  // ===========================================================================
+  // == USER PROFILE
+  // ===========================================================================
   Future<Map<String, dynamic>> fetchUserProfile(String userId) async {
     final row = await supabase.from('users').select().eq('id', userId).single();
     return Map<String, dynamic>.from(row as Map);
   }
 
-  // CONTEXTS
+  // ===========================================================================
+  // == CONTEXTS (For Study Section)
+  // ===========================================================================
   Future<String> createContext({
     required String title,
     required String resultFormat,
@@ -83,7 +87,9 @@ class SupabaseService {
     await supabase.from('contexts').delete().eq('id', id);
   }
 
-  // CONTEXT ATTACHMENTS
+  // ===========================================================================
+  // == CONTEXT ATTACHMENTS
+  // ===========================================================================
   Future<void> addContextAttachment({
     required String contextId,
     required String url,
@@ -95,7 +101,9 @@ class SupabaseService {
     });
   }
 
-  // CARDS
+  // ===========================================================================
+  // == CARDS (For Study Section)
+  // ===========================================================================
   Future<Map<String, dynamic>> createCard({
     required String contextId,
     required Map<String, dynamic> content,
@@ -149,7 +157,7 @@ class SupabaseService {
         .from('cards')
         .select()
         .eq('context_id', contextId)
-        .eq('user_id', firebaseUser.uid) // FIXED: Replaced colon with comma
+        .eq('user_id', firebaseUser.uid)
         .eq('saved', true)
         .gte('saved_at', since.toIso8601String());
     return (rows as List).length;
@@ -172,24 +180,13 @@ class SupabaseService {
     }, onConflict: 'context_id');
   }
 
-  // SAVED CARDS
-  Future<List<Map<String, dynamic>>> fetchSavedCards() async {
-    final fb_auth.User? u = fb_auth.FirebaseAuth.instance.currentUser;
-    if (u == null) return [];
-    final rows = await supabase
-        .from('cards')
-        .select()
-        .eq('user_id', u.uid)
-        .eq('saved', true)
-        .order('saved_at', ascending: false);
-    return List<Map<String, dynamic>>.from(rows as List);
-  }
-
   Future<void> deleteCard(String cardId) async {
     await supabase.from('cards').delete().eq('id', cardId);
   }
 
-  // ATTACHMENTS
+  // ===========================================================================
+  // == GENERAL ATTACHMENTS
+  // ===========================================================================
   Future<String> uploadAttachment(File file) async {
     final ext = file.path.split('.').last;
     final path = 'attachments/${uuid.v4()}.$ext';
@@ -197,21 +194,22 @@ class SupabaseService {
     return supabase.storage.from('event-images').getPublicUrl(path);
   }
 
-  // EVENTS
+  // ===========================================================================
+  // == TIMETABLE (EVENTS)
+  // ===========================================================================
   Future<Map<String, dynamic>> createEvent({
     String? groupId,
     required String title,
     String? description,
     required DateTime startTime,
     required DateTime endTime,
-    String? repeatRule,
   }) async {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
     final newId = uuid.v4();
     final row = await supabase
-        .from('events')
+        .from('timetable_events') // CORRECTED TABLE NAME
         .insert({
           'id': newId,
           'user_id': firebaseUser.uid,
@@ -234,12 +232,8 @@ class SupabaseService {
     required DateTime startTime,
     required DateTime endTime,
   }) async {
-    final fb_auth.User? firebaseUser =
-        fb_auth.FirebaseAuth.instance.currentUser;
-    if (firebaseUser == null) throw Exception('Not signed in');
-
     await supabase
-        .from('events')
+        .from('timetable_events') // CORRECTED TABLE NAME
         .update({
           'group_id': groupId,
           'title': title,
@@ -250,20 +244,97 @@ class SupabaseService {
         .eq('id', eventId);
   }
 
+  Future<void> deleteEvent(String eventId) async {
+    await supabase
+        .from('timetable_events') // CORRECTED TABLE NAME
+        .delete()
+        .eq('id', eventId);
+  }
+
   Future<List<Map<String, dynamic>>> fetchEvents() async {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) return [];
 
+    // This RPC gets the user's own events AND events from their subscriptions
     final rows = await supabase.rpc(
-      'get_events_with_groups',
-      params: {'p_user_id': firebaseUser.uid},
+      'get_timetable_events_for_user', // CORRECTED RPC NAME
     );
 
     return List<Map<String, dynamic>>.from(rows as List);
   }
-  // ========== TCA (Love Section) Functions ==========
 
+  // ===========================================================================
+  // == TIMETABLE (GROUPS)
+  // ===========================================================================
+  Future<List<Map<String, dynamic>>> fetchEventGroups() async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return [];
+
+    final response = await supabase.rpc(
+      'get_timetable_groups_with_event_counts', // CORRECTED RPC NAME
+    );
+
+    return List<Map<String, dynamic>>.from(response as List);
+  }
+
+  Future<void> createEventGroup(String groupName) async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) throw Exception('You must be logged in.');
+
+    final random = Random();
+    final color = Color.fromARGB(
+      255,
+      random.nextInt(156) + 100,
+      random.nextInt(156) + 100,
+      random.nextInt(156) + 100,
+    );
+
+    await supabase.from('timetable_groups').insert({
+      // CORRECTED TABLE NAME
+      'id': uuid.v4(),
+      'user_id': user.uid,
+      'group_name': groupName,
+      'visibility': 'public',
+      'group_color': // CORRECTED COLUMN NAME
+          '#${color.value.toRadixString(16).substring(2)}',
+    });
+  }
+
+  Future<void> toggleGroupVisibility(
+    String groupId,
+    String currentVisibility,
+  ) async {
+    final newVisibility = currentVisibility == 'public' ? 'private' : 'public';
+    await supabase
+        .from('timetable_groups') // CORRECTED TABLE NAME
+        .update({'visibility': newVisibility})
+        .eq('id', groupId);
+  }
+
+  Future<void> deleteEventGroup(String groupId) async {
+    await supabase
+        .from('timetable_groups') // CORRECTED TABLE NAME
+        .delete()
+        .eq('id', groupId);
+  }
+
+  // ===========================================================================
+  // == TIMETABLE (SUBSCRIPTIONS)
+  // ===========================================================================
+  Future<void> subscribeToTimetable(String timetableCode) async {
+    if (timetableCode.isEmpty) {
+      throw Exception('Timetable code cannot be empty.');
+    }
+    await supabase.rpc(
+      'subscribe_to_timetable',
+      params: {'p_timetable_code': timetableCode},
+    );
+  }
+
+  // ===========================================================================
+  // == TCA (LOVE SECTION)
+  // ===========================================================================
   Future<Map<String, dynamic>?> fetchActiveTcaCycle() async {
     final response = await supabase
         .from('swc_cycles')
@@ -294,62 +365,10 @@ class SupabaseService {
     if (user == null) throw Exception('You must be logged in to vote.');
 
     await supabase.from('tca_votes').insert({
-      'id': uuid.v4(),
+      'id': uuid.v4(), // ADDED missing ID
       'cycle_id': cycleId,
       'user_id': user.uid,
       'nominee_username': nomineeUsername,
     });
-  }
-
-  // ========== Timetable (Event Group) Functions ==========
-
-  Future<List<Map<String, dynamic>>> fetchEventGroups() async {
-    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
-    if (user == null) return [];
-
-    final response = await supabase.rpc(
-      'get_groups_with_event_counts',
-      params: {'p_user_id': user.uid},
-    );
-
-    return List<Map<String, dynamic>>.from(response as List);
-  }
-
-  Future<void> createEventGroup(String groupName) async {
-    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
-    if (user == null) throw Exception('You must be logged in.');
-
-    final random = Random();
-    // Generate a pleasant, not-too-dark color
-    final color = Color.fromARGB(
-      255,
-      random.nextInt(156) + 100,
-      random.nextInt(156) + 100,
-      random.nextInt(156) + 100,
-    );
-
-    await supabase.from('event_groups').insert({
-      'id': uuid.v4(),
-      'user_id': user.uid,
-      'group_name': groupName,
-      'visibility': 'public',
-      'color':
-          '#${color.value.toRadixString(16).substring(2)}', // Save as #RRGGBB
-    });
-  }
-
-  Future<void> toggleGroupVisibility(
-    String groupId,
-    String currentVisibility,
-  ) async {
-    final newVisibility = currentVisibility == 'public' ? 'private' : 'public';
-    await supabase
-        .from('event_groups')
-        .update({'visibility': newVisibility})
-        .eq('id', groupId);
-  }
-
-  Future<void> deleteEventGroup(String groupId) async {
-    await supabase.from('event_groups').delete().eq('id', groupId);
   }
 }

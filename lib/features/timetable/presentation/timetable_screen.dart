@@ -34,11 +34,24 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   Future<void> _checkPremium() async {
-    // TODO: replace with real premium check
-    final user = AuthService.instance.currentUser;
-    setState(() {
-      _isPremium = user != null && user.email?.endsWith('@premium.com') == true;
-    });
+    final uid = AuthService.instance.currentUser?.uid;
+    if (uid == null || !mounted) return;
+
+    try {
+      final profile = await SupabaseService.instance.fetchUserProfile(uid);
+      if (mounted) {
+        setState(() {
+          _isPremium = profile['is_premium'] as bool? ?? false;
+        });
+      }
+    } catch (e) {
+      // Handle potential error if profile doesn't exist or network fails
+      if (mounted) {
+        setState(() {
+          _isPremium = false;
+        });
+      }
+    }
   }
 
   Future<void> _loadMyCode() async {
@@ -320,7 +333,283 @@ class _TimetableScreenState extends State<TimetableScreen> {
     );
   }
 
+  Future<void> _editEvent(Map<String, dynamic> event) async {
+    final groups = await SupabaseService.instance.fetchEventGroups();
+    if (!mounted) return;
+
+    final formKey = GlobalKey<FormState>();
+    // Pre-fill with existing event data
+    String title = event['title'];
+    String? description = event['description'];
+    String? selectedGroupId = event['group_id'];
+    TimeOfDay startTime = TimeOfDay.fromDateTime(
+      DateTime.parse(event['start_time']).toLocal(),
+    );
+    TimeOfDay endTime = TimeOfDay.fromDateTime(
+      DateTime.parse(event['end_time']).toLocal(),
+    );
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (BuildContext context, StateSetter setModalState) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+              left: 16,
+              right: 16,
+              top: 20,
+            ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(16),
+              ),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  color: const Color.fromRGBO(255, 255, 255, 0.1),
+                  padding: const EdgeInsets.all(16),
+                  child: Form(
+                    key: formKey,
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'Edit Event',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.cyanAccent,
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            initialValue: title,
+                            decoration: const InputDecoration(
+                              labelText: 'Title',
+                              labelStyle: TextStyle(color: Colors.white70),
+                            ),
+                            style: const TextStyle(color: Colors.white),
+                            validator: (v) => (v == null || v.isEmpty)
+                                ? 'Enter a title'
+                                : null,
+                            onSaved: (v) => title = v!,
+                          ),
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            initialValue: description,
+                            decoration: const InputDecoration(
+                              labelText: 'Description (optional)',
+                              labelStyle: TextStyle(color: Colors.white70),
+                            ),
+                            style: const TextStyle(color: Colors.white),
+                            maxLines: 2,
+                            onSaved: (v) => description = v,
+                          ),
+                          const SizedBox(height: 12),
+                          // THIS IS THE CORRECTED DROPDOWN
+                          if (groups.isNotEmpty)
+                            DropdownButtonFormField<String>(
+                              value: selectedGroupId,
+                              hint: const Text(
+                                'Assign to a group (optional)',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                              dropdownColor: const Color.fromRGBO(
+                                30,
+                                30,
+                                30,
+                                1,
+                              ),
+                              style: const TextStyle(color: Colors.white),
+                              items: groups
+                                  .map(
+                                    (group) => DropdownMenuItem(
+                                      value: group['id'] as String,
+                                      child: Text(
+                                        group['group_name'] as String,
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (v) {
+                                setModalState(() => selectedGroupId = v);
+                              },
+                              onSaved: (v) => selectedGroupId = v,
+                            ),
+                          const SizedBox(height: 12),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Row(
+                                children: [
+                                  const Text(
+                                    'Starts at:',
+                                    style: TextStyle(color: Colors.white70),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  TextButton(
+                                    onPressed: () async {
+                                      final picked = await showTimePicker(
+                                        context: context,
+                                        initialTime: startTime,
+                                      );
+                                      if (picked != null) {
+                                        setModalState(() => startTime = picked);
+                                      }
+                                    },
+                                    child: Text(
+                                      startTime.format(context),
+                                      style: const TextStyle(
+                                        color: Colors.cyanAccent,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              Row(
+                                children: [
+                                  const Text(
+                                    'Ends at:',
+                                    style: TextStyle(color: Colors.white70),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  TextButton(
+                                    onPressed: () async {
+                                      final picked = await showTimePicker(
+                                        context: context,
+                                        initialTime: endTime,
+                                      );
+                                      if (picked != null) {
+                                        setModalState(() => endTime = picked);
+                                      }
+                                    },
+                                    child: Text(
+                                      endTime.format(context),
+                                      style: const TextStyle(
+                                        color: Colors.cyanAccent,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          Row(
+                            children: [
+                              IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.redAccent,
+                                ),
+                                onPressed: () async {
+                                  final confirm = await showDialog<bool>(
+                                    context: context,
+                                    builder: (dialogCtx) => AlertDialog(
+                                      title: const Text('Confirm Deletion'),
+                                      content: const Text(
+                                        'Are you sure you want to delete this event?',
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(
+                                            dialogCtx,
+                                          ).pop(false),
+                                          child: const Text('Cancel'),
+                                        ),
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.of(dialogCtx).pop(true),
+                                          child: const Text(
+                                            'Delete',
+                                            style: TextStyle(color: Colors.red),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                  if (confirm == true) {
+                                    await SupabaseService.instance.deleteEvent(
+                                      event['id'],
+                                    );
+                                    if (!mounted) return;
+                                    Navigator.pop(context);
+                                    _loadEvents();
+                                  }
+                                },
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.cyanAccent,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 16,
+                                    ),
+                                  ),
+                                  onPressed: () async {
+                                    if (formKey.currentState?.validate() ??
+                                        false) {
+                                      formKey.currentState?.save();
+                                      final startDT = DateTime(
+                                        _selectedDay!.year,
+                                        _selectedDay!.month,
+                                        _selectedDay!.day,
+                                        startTime.hour,
+                                        startTime.minute,
+                                      );
+                                      final endDT = DateTime(
+                                        _selectedDay!.year,
+                                        _selectedDay!.month,
+                                        _selectedDay!.day,
+                                        endTime.hour,
+                                        endTime.minute,
+                                      );
+                                      await SupabaseService.instance
+                                          .updateEvent(
+                                            eventId: event['id'],
+                                            title: title,
+                                            description: description,
+                                            groupId: selectedGroupId,
+                                            startTime: startDT,
+                                            endTime: endDT,
+                                          );
+                                      if (!mounted) return;
+                                      Navigator.pop(context);
+                                      _loadEvents();
+                                    }
+                                  },
+                                  child: const Text(
+                                    'Save Changes',
+                                    style: TextStyle(color: Colors.black),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   void _openHamburger() {
+    // Controller for the text field in the dialog
+    final codeController = TextEditingController();
+
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -348,6 +637,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
                     onPressed: () {
                       Clipboard.setData(ClipboardData(text: _myCode));
                       if (mounted) {
+                        Navigator.pop(context); // Close the bottom sheet
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Copied to clipboard')),
                         );
@@ -356,6 +646,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   ),
                 ),
                 const Divider(color: Colors.white24),
+                // This section is now fully functional
                 if (_isPremium)
                   ListTile(
                     leading: const Icon(Icons.input, color: Colors.white70),
@@ -363,12 +654,71 @@ class _TimetableScreenState extends State<TimetableScreen> {
                       'Enter Code',
                       style: TextStyle(color: Colors.white),
                     ),
-                    onTap: () {},
+                    onTap: () {
+                      Navigator.pop(context); // Close the hamburger menu
+                      // Show the dialog to enter a code
+                      showDialog(
+                        context: context,
+                        builder: (dialogContext) => AlertDialog(
+                          backgroundColor: const Color.fromRGBO(30, 30, 30, 1),
+                          title: const Text(
+                            'Subscribe to Timetable',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                          content: TextField(
+                            controller: codeController,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: const InputDecoration(
+                              labelText: 'Enter user\'s code',
+                              labelStyle: TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(dialogContext),
+                              child: const Text('Cancel'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () async {
+                                final code = codeController.text.trim();
+                                if (code.isNotEmpty) {
+                                  try {
+                                    await SupabaseService.instance
+                                        .subscribeToTimetable(code);
+                                    if (!mounted) return;
+                                    Navigator.pop(dialogContext);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Successfully subscribed! Refreshing events...',
+                                        ),
+                                        backgroundColor: Colors.green,
+                                      ),
+                                    );
+                                    _loadEvents(); // Refresh the events list
+                                  } catch (e) {
+                                    if (!mounted) return;
+                                    Navigator.pop(dialogContext);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Error: ${e.toString()}'),
+                                        backgroundColor: Colors.red,
+                                      ),
+                                    );
+                                  }
+                                }
+                              },
+                              child: const Text('Subscribe'),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   )
                 else
-                  ListTile(
-                    leading: const Icon(Icons.lock, color: Colors.white70),
-                    title: const Text(
+                  const ListTile(
+                    leading: Icon(Icons.lock, color: Colors.white70),
+                    title: Text(
                       'Enter Code (Premium)',
                       style: TextStyle(color: Colors.white38),
                     ),
@@ -377,7 +727,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
                 ListTile(
                   leading: const Icon(Icons.group, color: Colors.white70),
                   title: const Text(
-                    'Grouped Events',
+                    'Manage Groups',
                     style: TextStyle(color: Colors.white),
                   ),
                   onTap: () {
@@ -391,13 +741,16 @@ class _TimetableScreenState extends State<TimetableScreen> {
                         .then((_) => _loadEvents());
                   },
                 ),
+                // We will implement this screen later
                 ListTile(
                   leading: const Icon(Icons.person_add, color: Colors.white70),
                   title: const Text(
                     'Added Timetables',
                     style: TextStyle(color: Colors.white),
                   ),
-                  onTap: () {},
+                  onTap: () {
+                    // TODO: Build the screen to manage subscriptions
+                  },
                 ),
               ],
             ),
@@ -412,6 +765,14 @@ class _TimetableScreenState extends State<TimetableScreen> {
     final todaysEvents = _selectedDay != null
         ? _getEventsForDay(_selectedDay!)
         : [];
+    // Sort events by start time for cleaner display
+    todaysEvents.sort((a, b) {
+      final aTime = DateTime.parse(a['start_time']).toLocal();
+      final bTime = DateTime.parse(b['start_time']).toLocal();
+      return aTime.compareTo(bTime);
+    });
+
+    final currentUserId = AuthService.instance.currentUser?.uid;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -539,12 +900,33 @@ class _TimetableScreenState extends State<TimetableScreen> {
                             final startTime = DateFormat.jm().format(
                               DateTime.parse(event['start_time']).toLocal(),
                             );
+                            final groupName =
+                                event['timetable_groups']?['group_name'];
+                            final colorHex =
+                                event['timetable_groups']?['group_color'];
+                            final groupColor = colorHex != null
+                                ? Color(
+                                    int.parse(
+                                      colorHex.replaceFirst('#', '0xff'),
+                                    ),
+                                  )
+                                : Colors.transparent;
+
+                            // Check if the event belongs to the current user
+                            final isMyEvent = event['user_id'] == currentUserId;
+
                             return Card(
                               color: const Color.fromRGBO(255, 255, 255, 0.15),
                               shape: RoundedRectangleBorder(
+                                side: BorderSide(color: groupColor, width: 2),
                                 borderRadius: BorderRadius.circular(12),
                               ),
+                              margin: const EdgeInsets.only(bottom: 12),
                               child: ListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 8,
+                                ),
                                 title: Text(
                                   event['title'],
                                   style: const TextStyle(
@@ -552,16 +934,62 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                     fontWeight: FontWeight.bold,
                                   ),
                                 ),
-                                subtitle: Text(
-                                  event['description'] ?? '',
-                                  style: const TextStyle(color: Colors.white70),
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (event['description'] != null &&
+                                        event['description'].isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          top: 4.0,
+                                        ),
+                                        child: Text(
+                                          event['description'],
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      ),
+                                    if (groupName != null)
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          top: 6.0,
+                                        ),
+                                        child: Text(
+                                          'Group: $groupName',
+                                          style: TextStyle(
+                                            color: groupColor,
+                                            fontWeight: FontWeight.w500,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
                                 ),
-                                trailing: Text(
-                                  startTime,
-                                  style: const TextStyle(
-                                    color: Colors.cyanAccent,
-                                  ),
+                                trailing: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Text(
+                                      startTime,
+                                      style: const TextStyle(
+                                        color: Colors.cyanAccent,
+                                        fontSize: 16,
+                                      ),
+                                    ),
+                                    if (isMyEvent) const SizedBox(height: 4),
+                                    if (isMyEvent)
+                                      const Icon(
+                                        Icons.edit,
+                                        color: Colors.white54,
+                                        size: 18,
+                                      ),
+                                  ],
                                 ),
+                                // THIS IS THE CORRECTED ONTAP
+                                onTap: isMyEvent
+                                    ? () => _editEvent(event)
+                                    : null,
                               ),
                             );
                           },
