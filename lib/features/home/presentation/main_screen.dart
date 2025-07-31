@@ -1,15 +1,16 @@
-// lib/features/home/presentation/main_screen.dart
-
 import 'package:flutter/material.dart';
 import 'package:studywithcharles/features/study/presentation/study_list_screen.dart';
 import 'package:studywithcharles/features/timetable/presentation/timetable_screen.dart';
 import 'package:studywithcharles/features/love/presentation/love_screen.dart';
-import 'package:studywithcharles/features/pricing/presentation/pricing_screen.dart'; // ← new
-import 'package:studywithcharles/features/profile/presentation/profile_screen.dart'; // ← new
+import 'package:studywithcharles/features/pricing/presentation/pricing_screen.dart';
+import 'package:studywithcharles/features/profile/presentation/profile_screen.dart';
 
 class MainScreen extends StatefulWidget {
   static const routeName = '/';
-  const MainScreen({super.key});
+  // We add this to accept the starting tab index
+  final int? initialPageIndex;
+
+  const MainScreen({super.key, this.initialPageIndex});
 
   @override
   MainScreenState createState() => MainScreenState();
@@ -18,12 +19,19 @@ class MainScreen extends StatefulWidget {
 class MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
+  @override
+  void initState() {
+    super.initState();
+    // If an initial index is provided, use it. Otherwise, default to 0.
+    _currentIndex = widget.initialPageIndex ?? 0;
+  }
+
   static const List<Widget> _tabs = [
     StudyListScreen(),
     TimetableScreen(),
     LoveSectionScreen(),
-    PricingScreen(), // ← now real screen
-    ProfileScreen(), // ← now real screen
+    PricingScreen(),
+    ProfileScreen(),
   ];
 
   @override
@@ -35,6 +43,7 @@ class MainScreenState extends State<MainScreen> {
         type: BottomNavigationBarType.fixed,
         selectedItemColor: Colors.cyanAccent,
         unselectedItemColor: Colors.white70,
+        backgroundColor: Colors.black, // Added for better theme consistency
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.menu_book), label: 'Study'),
           BottomNavigationBarItem(

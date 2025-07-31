@@ -19,6 +19,40 @@ class SupabaseService {
     return Map<String, dynamic>.from(row as Map);
   }
 
+  /// Call this after you've confirmed payment succeeded.
+  Future<void> markUserAsPremium() async {
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+    await supabase
+        .from('users')
+        .update({'is_premium': true})
+        .eq('id', firebaseUser.uid);
+  }
+
+  /// Update any of the user’s profile fields.
+  Future<void> updateUserProfile({
+    String? name,
+    String? username,
+    String? bio,
+    String? photoUrl,
+    String? usdtWallet,
+  }) async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) throw Exception('Not signed in');
+
+    final updates = <String, dynamic>{};
+    if (name != null) updates['display_name'] = name;
+    if (username != null) updates['username'] = username;
+    if (bio != null) updates['bio'] = bio;
+    if (photoUrl != null) updates['avatar_url'] = photoUrl;
+    if (usdtWallet != null) updates['wallet_address'] = usdtWallet;
+
+    if (updates.isEmpty) return;
+
+    await supabase.from('users').update(updates).eq('id', user.uid);
+  }
+
   // ===========================================================================
   // == CONTEXTS (For Study Section)
   // ===========================================================================
@@ -209,7 +243,7 @@ class SupabaseService {
     if (firebaseUser == null) throw Exception('Not signed in');
     final newId = uuid.v4();
     final row = await supabase
-        .from('timetable_events') // CORRECTED TABLE NAME
+        .from('events')
         .insert({
           'id': newId,
           'user_id': firebaseUser.uid,
@@ -233,7 +267,7 @@ class SupabaseService {
     required DateTime endTime,
   }) async {
     await supabase
-        .from('timetable_events') // CORRECTED TABLE NAME
+        .from('events')
         .update({
           'group_id': groupId,
           'title': title,
@@ -245,20 +279,18 @@ class SupabaseService {
   }
 
   Future<void> deleteEvent(String eventId) async {
-    await supabase
-        .from('timetable_events') // CORRECTED TABLE NAME
-        .delete()
-        .eq('id', eventId);
+    await supabase.from('events').delete().eq('id', eventId);
   }
 
+  // THIS IS THE CORRECTED METHOD TO FIX EVENTS NOT SHOWING
   Future<List<Map<String, dynamic>>> fetchEvents() async {
-    final fb_auth.User? firebaseUser =
-        fb_auth.FirebaseAuth.instance.currentUser;
-    if (firebaseUser == null) return [];
+    final user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return [];
 
-    // This RPC gets the user's own events AND events from their subscriptions
+    // This calls the simpler, more reliable function from your schema
     final rows = await supabase.rpc(
-      'get_timetable_events_for_user', // CORRECTED RPC NAME
+      'get_events_with_groups',
+      params: {'p_user_id': user.uid},
     );
 
     return List<Map<String, dynamic>>.from(rows as List);
@@ -268,20 +300,18 @@ class SupabaseService {
   // == TIMETABLE (GROUPS)
   // ===========================================================================
   Future<List<Map<String, dynamic>>> fetchEventGroups() async {
-    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    final user = fb_auth.FirebaseAuth.instance.currentUser;
     if (user == null) return [];
-
     final response = await supabase.rpc(
-      'get_timetable_groups_with_event_counts', // CORRECTED RPC NAME
+      'get_groups_with_event_counts',
+      params: {'p_user_id': user.uid},
     );
-
     return List<Map<String, dynamic>>.from(response as List);
   }
 
   Future<void> createEventGroup(String groupName) async {
-    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    final user = fb_auth.FirebaseAuth.instance.currentUser;
     if (user == null) throw Exception('You must be logged in.');
-
     final random = Random();
     final color = Color.fromARGB(
       255,
@@ -289,15 +319,12 @@ class SupabaseService {
       random.nextInt(156) + 100,
       random.nextInt(156) + 100,
     );
-
-    await supabase.from('timetable_groups').insert({
-      // CORRECTED TABLE NAME
+    await supabase.from('event_groups').insert({
       'id': uuid.v4(),
       'user_id': user.uid,
       'group_name': groupName,
       'visibility': 'public',
-      'group_color': // CORRECTED COLUMN NAME
-          '#${color.value.toRadixString(16).substring(2)}',
+      'color': '#${color.value.toRadixString(16).substring(2)}',
     });
   }
 
@@ -307,16 +334,13 @@ class SupabaseService {
   ) async {
     final newVisibility = currentVisibility == 'public' ? 'private' : 'public';
     await supabase
-        .from('timetable_groups') // CORRECTED TABLE NAME
+        .from('event_groups')
         .update({'visibility': newVisibility})
         .eq('id', groupId);
   }
 
   Future<void> deleteEventGroup(String groupId) async {
-    await supabase
-        .from('timetable_groups') // CORRECTED TABLE NAME
-        .delete()
-        .eq('id', groupId);
+    await supabase.from('event_groups').delete().eq('id', groupId);
   }
 
   // ===========================================================================
@@ -365,10 +389,35 @@ class SupabaseService {
     if (user == null) throw Exception('You must be logged in to vote.');
 
     await supabase.from('tca_votes').insert({
-      'id': uuid.v4(), // ADDED missing ID
+      'id': uuid.v4(),
       'cycle_id': cycleId,
       'user_id': user.uid,
       'nominee_username': nomineeUsername,
     });
+  }
+
+  // ===========================================================================
+  // == PAYMENTS
+  // ===========================================================================
+  /// Creates a Paystack payment initialization and returns the authorization URL.
+  Future<String> initializePaystackTransaction(
+    int amount,
+    String email,
+    String reference,
+  ) async {
+    final response = await supabase.functions.invoke(
+      'initialize-payment',
+      body: {'amount': amount, 'email': email, 'reference': reference},
+    );
+
+    if (response.status != 200 || response.data == null) {
+      throw Exception('Failed to initialize payment: ${response.data}');
+    }
+
+    final authUrl = response.data['data']['authorization_url'];
+    if (authUrl == null) {
+      throw Exception('Authorization URL not found in response.');
+    }
+    return authUrl as String;
   }
 }
