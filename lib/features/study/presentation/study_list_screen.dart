@@ -29,6 +29,7 @@ class _StudyListScreenState extends State<StudyListScreen>
   final List<Map<String, String>> _messages = [];
   final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _scroll = ScrollController();
+  final List<String> _attachmentUrls = [];
 
   final TextEditingController _titleCtl = TextEditingController();
   String _selectedFormat = 'Summarize';
@@ -66,12 +67,18 @@ class _StudyListScreenState extends State<StudyListScreen>
     setState(() => _isLoading = true);
     try {
       final contexts = await SupabaseService.instance.fetchContexts();
-      _savedContexts = contexts;
-      _currentContextId = null;
-      _messages.clear();
+      if (!mounted) return;
+
+      // Clear all session state
+      setState(() {
+        _savedContexts = contexts;
+        _currentContextId = null;
+        _messages.clear();
+        _attachmentUrls.clear(); // FIX: Clear attachments
+        _isLoading = false;
+      });
     } catch (e) {
       _showGlassSnackBar('Error loading data: $e', isError: true);
-    } finally {
       if (mounted) {
         setState(() => _isLoading = false);
       }
@@ -225,26 +232,48 @@ class _StudyListScreenState extends State<StudyListScreen>
                             style: const TextStyle(color: Colors.white),
                           ),
                           onTap: () async {
-                            Navigator.of(context).pop();
+                            Navigator.of(context).pop(); // close the sheet
                             setState(() => _isLoading = true);
-                            _currentContextId = id;
-                            _messages.clear();
-                            final cards = await SupabaseService.instance
-                                .fetchCards(id);
-                            _messages.addAll(
-                              cards.map((row) {
-                                final content =
-                                    row['content'] as Map<String, dynamic>;
-                                // ✨ NEW: Handle both text and image types from saved history
-                                return {
-                                  'role': content['role'] as String,
-                                  'text': content['text'] as String,
-                                  'type': content['type'] ?? 'text',
-                                };
-                              }),
-                            );
-                            if (mounted) {
-                              setState(() => _isLoading = false);
+
+                            try {
+                              // ✨ FIX: Fetch both messages and attachment URLs
+                              final messages = await SupabaseService.instance
+                                  .fetchCards(id);
+                              final attachments = await SupabaseService.instance
+                                  .fetchContextAttachments(id);
+
+                              if (!mounted) return;
+                              setState(() {
+                                _currentContextId = id;
+                                _messages.clear();
+                                _attachmentUrls
+                                    .clear(); // Clear old attachments
+
+                                // Load the attachment URLs into state
+                                for (final att in attachments) {
+                                  _attachmentUrls.add(
+                                    att['attachment_url'] as String,
+                                  );
+                                }
+
+                                // Load the message history into state
+                                for (final m in messages) {
+                                  _messages.add({
+                                    'role': m['role'] ?? 'assistant',
+                                    'text': m['text'] ?? '',
+                                    'type': m['type'] ?? 'text',
+                                  });
+                                }
+                              });
+                            } catch (e) {
+                              _showGlassSnackBar(
+                                'Error loading saved card: $e',
+                                isError: true,
+                              );
+                            } finally {
+                              if (mounted) {
+                                setState(() => _isLoading = false);
+                              }
                             }
                           },
                           trailing: IconButton(
@@ -283,7 +312,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                                 );
                                 _showGlassSnackBar('Deleted "$title"');
                                 if (mounted) Navigator.of(context).pop();
-                                await _loadInitialData();
+                                await _loadInitialData(); // Reload all data
                               }
                             },
                           ),
@@ -292,6 +321,47 @@ class _StudyListScreenState extends State<StudyListScreen>
                     ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// (1) Place this inside _StudyListScreenState (e.g. after _openSavedCardsList())
+  Widget _buildDiagramPlaceholder() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.timeline, size: 64, color: Colors.white24),
+            const SizedBox(height: 16),
+            Text(
+              'Visual Thinking, Unlocked',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.cyanAccent,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Soon you’ll be able to turn any prompt into AI-powered diagrams—flowcharts, mind-maps, UML and more.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, fontSize: 16),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Launching 🎉 on or before October 1, 2025',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white38,
+                fontSize: 14,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -315,6 +385,7 @@ class _StudyListScreenState extends State<StudyListScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // Add Photo/Video
                   ListTile(
                     leading: const Icon(
                       Icons.photo_library,
@@ -332,16 +403,19 @@ class _StudyListScreenState extends State<StudyListScreen>
                         final url = await SupabaseService.instance
                             .uploadAttachment(file);
                         _showGlassSnackBar('Uploaded');
-                        setState(
-                          () => _messages.add({
+                        setState(() {
+                          _messages.add({
                             'role': 'user',
                             'text': url,
                             'type': 'image',
-                          }),
-                        );
+                          });
+                          _attachmentUrls.add(url); // ← track the URL
+                        });
                       }
                     },
                   ),
+
+                  // Take Photo
                   ListTile(
                     leading: const Icon(
                       Icons.camera_alt,
@@ -359,16 +433,19 @@ class _StudyListScreenState extends State<StudyListScreen>
                         final url = await SupabaseService.instance
                             .uploadAttachment(file);
                         _showGlassSnackBar('Uploaded');
-                        setState(
-                          () => _messages.add({
+                        setState(() {
+                          _messages.add({
                             'role': 'user',
                             'text': url,
                             'type': 'image',
-                          }),
-                        );
+                          });
+                          _attachmentUrls.add(url); // ← track the URL
+                        });
                       }
                     },
                   ),
+
+                  // Attach File (generic)
                   ListTile(
                     leading: const Icon(
                       Icons.attach_file,
@@ -383,6 +460,8 @@ class _StudyListScreenState extends State<StudyListScreen>
                       _showGlassSnackBar('File picker not implemented');
                     },
                   ),
+
+                  // Save (initial)
                   ListTile(
                     leading: const Icon(Icons.save, color: Colors.cyanAccent),
                     title: const Text(
@@ -416,9 +495,12 @@ class _StudyListScreenState extends State<StudyListScreen>
   }
 
   Future<void> _saveCurrentCard() async {
-    if (_messages.isEmpty) return;
+    // Prevent saving an empty card
+    if (_messages.isEmpty && _attachmentUrls.isEmpty) return;
     setState(() => _isLoading = true);
+
     try {
+      // This part handles the very first save of a new card
       if (_currentContextId == null) {
         final newContextId = await SupabaseService.instance.createContext(
           title: _titleCtl.text.trim().isEmpty
@@ -426,15 +508,29 @@ class _StudyListScreenState extends State<StudyListScreen>
               : _titleCtl.text.trim(),
           resultFormat: _selectedFormat,
           moreContext: _moreCtl.text.isEmpty ? null : _moreCtl.text.trim(),
+          // Pass any attachments that were added before the first save
+          attachmentUrls: _attachmentUrls,
         );
-        _currentContextId = newContextId;
+        // Set the new ID so that autosave can take over
+        setState(() => _currentContextId = newContextId);
       }
+
+      // Perform the upsert for the card's message content
       await SupabaseService.instance.saveCard(
         contextId: _currentContextId!,
         content: {'messages': _messages},
       );
+
       _showGlassSnackBar('Card saved! 🎉');
-      await _loadInitialData();
+
+      // ✨ FIX: No longer calls _loadInitialData() which would clear the screen
+      // Instead, we just refresh the list of saved cards in the background.
+      final contexts = await SupabaseService.instance.fetchContexts();
+      if (mounted) {
+        setState(() {
+          _savedContexts = contexts;
+        });
+      }
     } catch (e) {
       _showGlassSnackBar('Error saving card: $e', isError: true);
     } finally {
@@ -596,104 +692,95 @@ class _StudyListScreenState extends State<StudyListScreen>
     if (mounted) setState(() => _rulesOpen = false);
   }
 
-  Future<void> _sendMessageHandler(String text) async {
-    if (text.isEmpty || !mounted) return;
-    if (_currentContextId == null) {
-      _openContextRules();
-      return;
-    }
-
-    final messageType = _displaySection == 1 ? 'image_prompt' : 'text';
-    setState(
-      () => _messages.add({'role': 'user', 'text': text, 'type': messageType}),
-    );
-    _msgCtrl.clear();
+  /// Smoothly scrolls your ListView to the bottom after new messages.
+  void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients)
+      if (_scroll.hasClients) {
         _scroll.animateTo(
           _scroll.position.maxScrollExtent,
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeOut,
         );
+      }
     });
+  }
+
+  Future<void> _sendMessageHandler(String text) async {
+    if (text.isEmpty || !mounted) return;
+
+    // If we haven't created a context/card yet, force context‐rules first
+    if (_currentContextId == null) {
+      _openContextRules();
+      return;
+    }
+
+    // 1) Show the user's message immediately
+    final messageType = _displaySection == 1 ? 'image_prompt' : 'text';
+    setState(() {
+      _messages.add({'role': 'user', 'text': text, 'type': messageType});
+    });
+    _msgCtrl.clear();
+    _scrollToBottom();
 
     try {
-      String aiResponseText;
-      String aiResponseType;
+      setState(() => _isLoading = true);
 
-      // ✅ CHANGED: Logic to call the correct backend function
+      // 2) Call the right backend function,
+      //    sending both prompt and attachments list
+      String aiText;
+      String aiType;
       if (_displaySection == 1) {
-        // Diagram Section
-        setState(() => _isLoading = true);
-        aiResponseText = await _generateImage(prompt: text);
-        aiResponseType = 'image';
+        // Image generation branch
+        final response = await Supabase.instance.client.functions.invoke(
+          'image-proxy',
+          body: {
+            'prompt': text,
+            'attachments': _attachmentUrls, // URLs of uploaded files
+          },
+        );
+        if (response.status != 200) {
+          throw Exception(
+            'Image proxy error ${response.status}: ${response.data}',
+          );
+        }
+        aiText = response.data['response'] as String;
+        aiType = 'image';
       } else {
-        // Text or Code Section
-        aiResponseText = await _queryText(history: _messages);
-        aiResponseType = 'text';
+        // Text generation branch (multimodal)
+        final response = await Supabase.instance.client.functions.invoke(
+          'text-proxy',
+          body: {
+            'prompt': text,
+            'attachments': _attachmentUrls, // URLs of uploaded files
+          },
+        );
+        if (response.status != 200) {
+          throw Exception(
+            'Text proxy error ${response.status}: ${response.data}',
+          );
+        }
+        aiText = response.data['response'] as String;
+        aiType = 'text';
       }
 
       if (!mounted) return;
+
+      // 3) Show the AI's response
       setState(() {
         _isLoading = false;
-        _messages.add({
-          'role': 'assistant',
-          'text': aiResponseText,
-          'type': aiResponseType,
-        });
+        _messages.add({'role': 'assistant', 'text': aiText, 'type': aiType});
       });
+      _scrollToBottom();
 
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients)
-          _scroll.animateTo(
-            _scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        _showGlassSnackBar('AI error: $e', isError: true);
-      }
-    }
-  }
-
-  // ✅ CHANGED: Renamed from _queryGeminiProxy to be more specific
-  Future<String> _queryText({
-    required List<Map<String, String>> history,
-  }) async {
-    final body = {'history': history};
-    try {
-      final response = await Supabase.instance.client.functions.invoke(
-        'gemini-proxy',
-        body: body,
+      // 4) ✨ Auto-save the updated conversation
+      await SupabaseService.instance.saveCard(
+        contextId: _currentContextId!,
+        content: {'messages': _messages},
       );
-      if (response.status != 200)
-        throw Exception(
-          'Backend function error ${response.status}: ${response.data}',
-        );
-      return response.data['reply'] as String;
+      print('Card autosaved successfully!');
     } catch (e) {
-      throw Exception('Failed to call text proxy: $e');
-    }
-  }
-
-  // ✨ NEW: Dedicated function to call the image generation proxy
-  Future<String> _generateImage({required String prompt}) async {
-    final body = {'prompt': prompt};
-    try {
-      final response = await Supabase.instance.client.functions.invoke(
-        'imagen-proxy',
-        body: body,
-      );
-      if (response.status != 200)
-        throw Exception(
-          'Backend function error ${response.status}: ${response.data}',
-        );
-      return response.data['url'] as String;
-    } catch (e) {
-      throw Exception('Failed to call image proxy: $e');
+      setState(() => _isLoading = false);
+      _showGlassSnackBar('AI error: $e', isError: true);
     }
   }
 
@@ -848,9 +935,15 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
-  // ✅ CHANGED: This widget can now display both text and images
+  /// (2) Replace entire _buildCardContent with:
   Widget _buildCardContent(int pageIndex) {
+    // If in DIAGRAM tab with no messages, show our placeholder
+    if (pageIndex == 1 && _messages.isEmpty && !_isLoading) {
+      return _buildDiagramPlaceholder();
+    }
+
     if (_messages.isEmpty && !_isLoading) {
+      // existing “no messages” for TEXT/CODE
       return Center(
         child: Text(
           'No messages yet.\nStart a new conversation!',
@@ -859,28 +952,32 @@ class _StudyListScreenState extends State<StudyListScreen>
         ),
       );
     }
+
     return ListView.builder(
       controller: _scroll,
       padding: const EdgeInsets.all(16),
       itemCount: _messages.length,
       itemBuilder: (_, index) {
-        final message = _messages[index];
-        final isUser = message['role'] == 'user';
-        final messageType = message['type'] ?? 'text';
+        final msg = _messages[index];
+        final isUser = msg['role'] == 'user';
+        final type = msg['type'] ?? 'text';
+        final text = msg['text'] ?? '';
 
-        Widget contentWidget;
-        if (messageType == 'image') {
-          contentWidget = Image.network(
-            message['text']!,
-            loadingBuilder: (context, child, progress) => progress == null
+        Widget content;
+        if (type == 'image') {
+          // your existing Image.network branch
+          content = Image.network(
+            text,
+            loadingBuilder: (c, child, prog) => prog == null
                 ? child
                 : const Center(child: CircularProgressIndicator()),
-            errorBuilder: (context, error, stackTrace) =>
+            errorBuilder: (c, _, __) =>
                 const Icon(Icons.error_outline, color: Colors.redAccent),
           );
         } else {
-          contentWidget = SelectableText(
-            message['text']!,
+          // user or assistant text bubble
+          content = SelectableText(
+            text,
             style: TextStyle(color: isUser ? Colors.black : Colors.white),
           );
         }
@@ -899,7 +996,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                   : const Color.fromRGBO(255, 255, 255, 0.15),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: contentWidget,
+            child: content,
           ),
         );
       },

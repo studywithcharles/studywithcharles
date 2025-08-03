@@ -135,6 +135,17 @@ class SupabaseService {
     });
   }
 
+  /// Fetches all attachment records for a given context ID.
+  Future<List<Map<String, dynamic>>> fetchContextAttachments(
+    String contextId,
+  ) async {
+    final attachments = await supabase
+        .from('context_attachments')
+        .select('attachment_url')
+        .eq('context_id', contextId);
+    return List<Map<String, dynamic>>.from(attachments as List);
+  }
+
   // ===========================================================================
   // == CARDS (For Study Section)
   // ===========================================================================
@@ -161,23 +172,22 @@ class SupabaseService {
     return Map<String, dynamic>.from(row as Map);
   }
 
+  /// Pulls back the FULL message history for one context.
   Future<List<Map<String, dynamic>>> fetchCards(String contextId) async {
-    final response = await supabase
+    // Grab the one row that we previously upserted for this context
+    final row = await supabase
         .from('cards')
         .select('content')
         .eq('context_id', contextId)
         .eq('saved', true)
-        .limit(1)
-        .maybeSingle();
-    if (response == null) {
-      return [];
-    }
-    final content = response['content'] as Map<String, dynamic>;
-    final messages = content['messages'] as List?;
-    if (messages == null) {
-      return [];
-    }
-    return List<Map<String, dynamic>>.from(messages);
+        .single(); // <-- use single() instead of limit(1).maybeSingle()
+
+    // Extract the "messages" list out of the JSON column
+    final content = row['content'] as Map<String, dynamic>;
+    final rawMessages = content['messages'] as List<dynamic>? ?? [];
+
+    // Force it into a List<Map<String,dynamic>> so our UI code can just consume it
+    return rawMessages.cast<Map<String, dynamic>>();
   }
 
   Future<int> countSavedCardsSince({
@@ -201,17 +211,22 @@ class SupabaseService {
     required String contextId,
     required Map<String, dynamic> content,
   }) async {
-    final fb_auth.User? firebaseUser =
-        fb_auth.FirebaseAuth.instance.currentUser;
-    if (firebaseUser == null) throw Exception('Not signed in');
-    await supabase.from('cards').upsert({
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) throw Exception('Not signed in');
+
+    // Build a full row, including a unique ID
+    final cardData = {
+      'id': uuid.v4(), // ← Always generate a new ID
       'context_id': contextId,
-      'user_id': firebaseUser.uid,
+      'user_id': user.uid,
       'content': content,
       'type': 'text',
       'saved': true,
       'saved_at': DateTime.now().toIso8601String(),
-    }, onConflict: 'context_id');
+    };
+
+    // Upsert: insert if new, or update existing by context_id
+    await supabase.from('cards').upsert(cardData, onConflict: 'context_id');
   }
 
   Future<void> deleteCard(String cardId) async {
@@ -224,8 +239,16 @@ class SupabaseService {
   Future<String> uploadAttachment(File file) async {
     final ext = file.path.split('.').last;
     final path = 'attachments/${uuid.v4()}.$ext';
-    await supabase.storage.from('event-images').upload(path, file);
-    return supabase.storage.from('event-images').getPublicUrl(path);
+
+    // Upload into our new bucket:
+    await supabase.storage.from('study-attachments').upload(path, file);
+
+    // Return a public URL so the app can display it:
+    final publicUrl = supabase.storage
+        .from('study-attachments')
+        .getPublicUrl(path);
+
+    return publicUrl;
   }
 
   // ===========================================================================
