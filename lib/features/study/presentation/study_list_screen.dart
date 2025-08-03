@@ -55,12 +55,8 @@ class _StudyListScreenState extends State<StudyListScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) {
-      setState(() {
-        _currentContextId = null;
-        _messages.clear();
-      });
-    }
+    // We no longer need to clear the state when the app is paused.
+    // This prevents the card from resetting when you pick an image.
   }
 
   Future<void> _loadInitialData() async {
@@ -236,7 +232,11 @@ class _StudyListScreenState extends State<StudyListScreen>
                             setState(() => _isLoading = true);
 
                             try {
-                              // ✨ FIX: Fetch both messages and attachment URLs
+                              // Find the full context data from the already loaded list
+                              final fullContextData = _savedContexts.firstWhere(
+                                (c) => c['id'] == id,
+                              );
+
                               final messages = await SupabaseService.instance
                                   .fetchCards(id);
                               final attachments = await SupabaseService.instance
@@ -246,17 +246,22 @@ class _StudyListScreenState extends State<StudyListScreen>
                               setState(() {
                                 _currentContextId = id;
                                 _messages.clear();
-                                _attachmentUrls
-                                    .clear(); // Clear old attachments
+                                _attachmentUrls.clear();
 
-                                // Load the attachment URLs into state
+                                // ✨ FIX: Populate the context rule fields in the UI
+                                _titleCtl.text = fullContextData['title'] ?? '';
+                                _selectedFormat =
+                                    fullContextData['result_format'] ??
+                                    'Summarize';
+                                _moreCtl.text =
+                                    fullContextData['more_context'] ?? '';
+
                                 for (final att in attachments) {
                                   _attachmentUrls.add(
                                     att['attachment_url'] as String,
                                   );
                                 }
 
-                                // Load the message history into state
                                 for (final m in messages) {
                                   _messages.add({
                                     'role': m['role'] ?? 'assistant',
@@ -312,7 +317,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                                 );
                                 _showGlassSnackBar('Deleted "$title"');
                                 if (mounted) Navigator.of(context).pop();
-                                await _loadInitialData(); // Reload all data
+                                await _loadInitialData();
                               }
                             },
                           ),
