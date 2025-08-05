@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
@@ -45,5 +46,15 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+
+	<!-- CAMERA + PHOTO LIBRARY permission descriptions -->
+	<key>NSCameraUsageDescription</key>
+	<string>We need camera access so you can snap photos to attach to your study card.</string>
+
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>We need photo library access so you can pick images and files from your device.</string>
+
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>We need permission to save files or screenshots back to your library.</string>
 </dict>
 </plist>

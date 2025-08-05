@@ -11,26 +11,35 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Cupertino icons for iOS-style widgets
+  # iOS-style icons
   cupertino_icons: ^1.0.8
 
-  # Supabase for your Postgres backend
+  # Supabase
   supabase_flutter: ^2.9.1
-
-  # Environment variable support
   flutter_dotenv: ^5.2.1
 
-  # Firebase core & auth
+  # Firebase
   firebase_core: ^3.15.1
   firebase_auth: ^5.6.2
 
+  # Audio playback
+  audioplayers: ^6.5.0
+
+  # Core functionality
   uuid: ^3.0.6
-  # file_picker: ^5.5.0
+  file_picker: ^10.2.1
   image_picker: ^0.8.7+4
-  http: ^1.2.1
+
+  # ✨ Downgrade http to 0.13.x to resolve conflict
+  http: ^0.13.6
+
   table_calendar: ^3.0.8
   intl: ^0.17.0
   webview_flutter: ^4.10.0
+  path_provider: ^2.0.14
+  permission_handler: ^12.0.1
+  share_plus: ^11.0.0
+
 
 dev_dependencies:
   flutter_test:

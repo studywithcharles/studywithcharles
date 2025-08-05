@@ -1,9 +1,16 @@
-// import 'dart:convert';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:image_picker/image_picker.dart';
-// import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart'; // for Clipboard
+import 'package:share_plus/share_plus.dart'; // add to pubspec.yaml
+import 'package:http/http.dart' as http; // add to pubspec.yaml
+import 'package:audioplayers/audioplayers.dart';
+import 'package:studywithcharles/shared/utils/permissions.dart';
 import 'package:studywithcharles/shared/services/auth_service.dart';
 import 'package:studywithcharles/shared/services/supabase_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -331,6 +338,164 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
+  /// Smart helper for picking, uploading, and queuing an attachment URL.
+  Future<void> _handleFileUpload(ImageSource source) async {
+    // 0️⃣ Ensure camera & storage permissions first
+    final granted = await ensureStorageAndCameraPermissions();
+    if (!granted) {
+      _showGlassSnackBar(
+        'Camera & storage permissions are required to attach images.',
+        isError: true,
+      );
+      return;
+    }
+
+    // 1️⃣ Close the bottom sheet immediately.
+    Navigator.of(context).pop();
+
+    // 2️⃣ Prevent more than 3 attachments.
+    if (_attachmentUrls.length >= 3) {
+      _showGlassSnackBar('You can attach up to 3 images only.', isError: true);
+      return;
+    }
+
+    // 3️⃣ If this is a brand-new card, create it first.
+    if (_currentContextId == null) {
+      _showGlassSnackBar('Creating new card...');
+      try {
+        final newContextId = await SupabaseService.instance.createContext(
+          title: _titleCtl.text.trim().isEmpty
+              ? 'Untitled Card'
+              : _titleCtl.text.trim(),
+          resultFormat: _selectedFormat,
+          moreContext: _moreCtl.text.isEmpty ? null : _moreCtl.text.trim(),
+        );
+        if (!mounted) return;
+        setState(() => _currentContextId = newContextId);
+      } catch (e) {
+        _showGlassSnackBar('Failed to create card: $e', isError: true);
+        return;
+      }
+    }
+
+    // 4️⃣ Let the user pick or take a photo.
+    final file = await _pickImage(source);
+    if (file == null) return;
+
+    // 5️⃣ Upload and link it.
+    _showGlassSnackBar('Uploading…');
+    try {
+      final url = await SupabaseService.instance.uploadAttachment(file);
+      await SupabaseService.instance.addContextAttachment(
+        contextId: _currentContextId!,
+        url: url,
+      );
+
+      // 6️⃣ Add the URL to the state to display the thumbnail.
+      setState(() {
+        _attachmentUrls.add(url);
+      });
+      _showGlassSnackBar('Image added! You can add more or type your prompt.');
+    } catch (e) {
+      _showGlassSnackBar('Upload failed: $e', isError: true);
+    }
+  }
+
+  /// Opens your attachment menu and routes taps to the helper above.
+  void _openCardActionsMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: Container(
+              color: const Color.fromRGBO(255, 255, 255, 0.1),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ListTile(
+                    leading: const Icon(
+                      Icons.photo_library,
+                      color: Colors.white70,
+                    ),
+                    title: const Text(
+                      'Add Photo/Video',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () => _handleFileUpload(ImageSource.gallery),
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.camera_alt,
+                      color: Colors.white70,
+                    ),
+                    title: const Text(
+                      'Take Photo',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () => _handleFileUpload(ImageSource.camera),
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.attach_file,
+                      color: Colors.white70,
+                    ),
+                    title: const Text(
+                      'Attach File',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _showGlassSnackBar('File picker not implemented yet');
+                    },
+                  ),
+                  const Divider(color: Colors.white24),
+                  if (_currentContextId != null)
+                    const ListTile(
+                      leading: Icon(
+                        Icons.check_circle,
+                        color: Colors.greenAccent,
+                      ),
+                      title: Text(
+                        'CARD IS SAVED',
+                        style: TextStyle(
+                          color: Colors.greenAccent,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    )
+                  else
+                    ListTile(
+                      leading: const Icon(Icons.save, color: Colors.cyanAccent),
+                      title: const Text(
+                        'SAVE THIS CARD',
+                        style: TextStyle(
+                          color: Colors.cyanAccent,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        _saveCurrentCard();
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// (1) Place this inside _StudyListScreenState (e.g. after _openSavedCardsList())
   Widget _buildDiagramPlaceholder() {
     return Center(
@@ -372,125 +537,6 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
-  void _openCardActionsMenu() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: ClipRRect(
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              color: const Color.fromRGBO(255, 255, 255, 0.1),
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Add Photo/Video
-                  ListTile(
-                    leading: const Icon(
-                      Icons.photo_library,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Add Photo/Video',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      final file = await _pickImage(ImageSource.gallery);
-                      if (file != null) {
-                        _showGlassSnackBar('Uploading…');
-                        final url = await SupabaseService.instance
-                            .uploadAttachment(file);
-                        _showGlassSnackBar('Uploaded');
-                        setState(() {
-                          _messages.add({
-                            'role': 'user',
-                            'text': url,
-                            'type': 'image',
-                          });
-                          _attachmentUrls.add(url); // ← track the URL
-                        });
-                      }
-                    },
-                  ),
-
-                  // Take Photo
-                  ListTile(
-                    leading: const Icon(
-                      Icons.camera_alt,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Take Photo',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      final file = await _pickImage(ImageSource.camera);
-                      if (file != null) {
-                        _showGlassSnackBar('Uploading…');
-                        final url = await SupabaseService.instance
-                            .uploadAttachment(file);
-                        _showGlassSnackBar('Uploaded');
-                        setState(() {
-                          _messages.add({
-                            'role': 'user',
-                            'text': url,
-                            'type': 'image',
-                          });
-                          _attachmentUrls.add(url); // ← track the URL
-                        });
-                      }
-                    },
-                  ),
-
-                  // Attach File (generic)
-                  ListTile(
-                    leading: const Icon(
-                      Icons.attach_file,
-                      color: Colors.white70,
-                    ),
-                    title: const Text(
-                      'Attach File',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _showGlassSnackBar('File picker not implemented');
-                    },
-                  ),
-
-                  // Save (initial)
-                  ListTile(
-                    leading: const Icon(Icons.save, color: Colors.cyanAccent),
-                    title: const Text(
-                      'SAVE THIS CARD',
-                      style: TextStyle(
-                        color: Colors.cyanAccent,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      _saveCurrentCard();
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   Future<File?> _pickImage(ImageSource src) async {
     final XFile? picked = await ImagePicker().pickImage(
       source: src,
@@ -500,36 +546,48 @@ class _StudyListScreenState extends State<StudyListScreen>
   }
 
   Future<void> _saveCurrentCard() async {
-    // Prevent saving an empty card
-    if (_messages.isEmpty && _attachmentUrls.isEmpty) return;
+    // This function is now ONLY for the very first save.
+    // Do nothing if the card is empty or already exists.
+    if ((_messages.isEmpty && _attachmentUrls.isEmpty) ||
+        _currentContextId != null) {
+      return;
+    }
+
     setState(() => _isLoading = true);
 
     try {
-      // This part handles the very first save of a new card
-      if (_currentContextId == null) {
-        final newContextId = await SupabaseService.instance.createContext(
-          title: _titleCtl.text.trim().isEmpty
-              ? 'Untitled Card'
-              : _titleCtl.text.trim(),
-          resultFormat: _selectedFormat,
-          moreContext: _moreCtl.text.isEmpty ? null : _moreCtl.text.trim(),
-          // Pass any attachments that were added before the first save
-          attachmentUrls: _attachmentUrls,
+      // 1. Create the context record and get the new ID.
+      final newContextId = await SupabaseService.instance.createContext(
+        title: _titleCtl.text.trim().isEmpty
+            ? 'Untitled Card'
+            : _titleCtl.text.trim(),
+        resultFormat: _selectedFormat,
+        moreContext: _moreCtl.text.isEmpty ? null : _moreCtl.text.trim(),
+      );
+
+      // 2. Link any attachments that were added *before* the first save.
+      for (final url in _attachmentUrls) {
+        await SupabaseService.instance.addContextAttachment(
+          contextId: newContextId,
+          url: url,
         );
-        // Set the new ID so that autosave can take over
-        setState(() => _currentContextId = newContextId);
       }
 
-      // Perform the upsert for the card's message content
+      // 3. Save the initial card content (messages).
       await SupabaseService.instance.saveCard(
-        contextId: _currentContextId!,
+        contextId: newContextId,
         content: {'messages': _messages},
       );
 
+      // 4. Update the UI state.
+      if (!mounted) return;
+      setState(() {
+        _currentContextId = newContextId;
+      });
+
       _showGlassSnackBar('Card saved! 🎉');
 
-      // ✨ FIX: No longer calls _loadInitialData() which would clear the screen
-      // Instead, we just refresh the list of saved cards in the background.
+      // 5. Refresh the list of saved cards in the background without clearing the UI.
       final contexts = await SupabaseService.instance.fetchContexts();
       if (mounted) {
         setState(() {
@@ -543,8 +601,10 @@ class _StudyListScreenState extends State<StudyListScreen>
     }
   }
 
+  /// Opens your context‐rules modal, now with image + file picking (50 MB limit) and permission checks.
   void _openContextRules() async {
     setState(() => _rulesOpen = true);
+
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -573,6 +633,8 @@ class _StudyListScreenState extends State<StudyListScreen>
                       ),
                     ),
                     const SizedBox(height: 12),
+
+                    // Course Title
                     TextField(
                       controller: _titleCtl,
                       decoration: const InputDecoration(
@@ -584,6 +646,8 @@ class _StudyListScreenState extends State<StudyListScreen>
                       style: const TextStyle(color: Colors.white),
                     ),
                     const SizedBox(height: 12),
+
+                    // Result Format
                     DropdownButtonFormField<String>(
                       value: _selectedFormat,
                       items: const [
@@ -617,17 +681,116 @@ class _StudyListScreenState extends State<StudyListScreen>
                       style: const TextStyle(color: Colors.white),
                     ),
                     const SizedBox(height: 12),
+
+                    // Add Photo/Video
                     OutlinedButton.icon(
-                      onPressed: () => _showGlassSnackBar(
-                        'Attach files from here not yet supported',
+                      icon: const Icon(
+                        Icons.add_a_photo,
+                        color: Colors.white70,
                       ),
-                      icon: const Icon(Icons.add, color: Colors.white70),
                       label: const Text(
-                        'Add Attachments',
+                        'Add Photo/Video',
                         style: TextStyle(color: Colors.white70),
                       ),
+                      onPressed: () async {
+                        // Permissions
+                        final ok = await ensureStorageAndCameraPermissions();
+                        if (!ok) {
+                          _showGlassSnackBar(
+                            'Camera & storage permissions are required.',
+                            isError: true,
+                          );
+                          return;
+                        }
+                        // Ensure context exists
+                        if (_currentContextId == null) {
+                          _showGlassSnackBar(
+                            'Please tap “Save” first to create the card before adding attachments.',
+                            isError: true,
+                          );
+                          return;
+                        }
+                        // Delegate to image flow
+                        _openCardActionsMenu();
+                      },
+                    ),
+                    const SizedBox(height: 8),
+
+                    // Attach arbitrary file up to 50 MB
+                    OutlinedButton.icon(
+                      icon: const Icon(
+                        Icons.attach_file,
+                        color: Colors.white70,
+                      ),
+                      label: const Text(
+                        'Attach File',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                      onPressed: () async {
+                        // Permissions
+                        final ok = await ensureStorageAndCameraPermissions();
+                        if (!ok) {
+                          _showGlassSnackBar(
+                            'Storage permission is required to attach files.',
+                            isError: true,
+                          );
+                          return;
+                        }
+                        // Ensure context exists
+                        if (_currentContextId == null) {
+                          _showGlassSnackBar(
+                            'Please tap “Save” first to create the card before adding attachments.',
+                            isError: true,
+                          );
+                          return;
+                        }
+                        // Pick file
+                        final result = await FilePicker.platform.pickFiles(
+                          withData: true,
+                        );
+                        if (result == null) return; // cancelled
+                        final fileBytes = result.files.single.bytes;
+                        final fileName = result.files.single.name;
+                        if (fileBytes == null) {
+                          _showGlassSnackBar(
+                            'Unable to read file.',
+                            isError: true,
+                          );
+                          return;
+                        }
+                        // Size check
+                        final sizeMB = fileBytes.lengthInBytes / (1024 * 1024);
+                        if (sizeMB > 50) {
+                          _showGlassSnackBar(
+                            'File must be ≤ 50 MB.',
+                            isError: true,
+                          );
+                          return;
+                        }
+                        // Upload
+                        _showGlassSnackBar('Uploading file…');
+                        try {
+                          final tempDir = (await getTemporaryDirectory()).path;
+                          final tempFile = File('$tempDir/$fileName')
+                            ..writeAsBytesSync(fileBytes);
+                          final url = await SupabaseService.instance
+                              .uploadAttachment(tempFile);
+                          await SupabaseService.instance.addContextAttachment(
+                            contextId: _currentContextId!,
+                            url: url,
+                          );
+                          _showGlassSnackBar('File attached!');
+                        } catch (e) {
+                          _showGlassSnackBar(
+                            'File upload failed: $e',
+                            isError: true,
+                          );
+                        }
+                      },
                     ),
                     const SizedBox(height: 12),
+
+                    // More Context
                     TextField(
                       controller: _moreCtl,
                       decoration: const InputDecoration(
@@ -640,6 +803,8 @@ class _StudyListScreenState extends State<StudyListScreen>
                       maxLines: 3,
                     ),
                     const SizedBox(height: 16),
+
+                    // Cancel + Save Buttons
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
@@ -656,31 +821,37 @@ class _StudyListScreenState extends State<StudyListScreen>
                               ? null
                               : () async {
                                   try {
-                                    final id = await SupabaseService.instance
-                                        .createContext(
-                                          title: _titleCtl.text.trim(),
-                                          resultFormat: _selectedFormat,
-                                          moreContext: _moreCtl.text.isEmpty
-                                              ? null
-                                              : _moreCtl.text,
-                                        );
-                                    if (!mounted) return;
-                                    setState(() => _currentContextId = id);
-                                    _showGlassSnackBar('Context created!');
+                                    if (_currentContextId == null) {
+                                      final id = await SupabaseService.instance
+                                          .createContext(
+                                            title: _titleCtl.text.trim(),
+                                            resultFormat: _selectedFormat,
+                                            moreContext:
+                                                _moreCtl.text.trim().isEmpty
+                                                ? null
+                                                : _moreCtl.text.trim(),
+                                          );
+                                      if (!mounted) return;
+                                      setState(() => _currentContextId = id);
+                                      _showGlassSnackBar(
+                                        'Context saved! You can now add attachments.',
+                                      );
+                                    }
                                     Navigator.of(context).pop();
                                   } catch (e) {
-                                    if (mounted)
+                                    if (mounted) {
                                       _showGlassSnackBar(
-                                        'Error: $e',
+                                        'Error saving context: $e',
                                         isError: true,
                                       );
+                                    }
                                   }
                                 },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.cyanAccent,
                           ),
                           child: const Text(
-                            'Continue',
+                            'Save',
                             style: TextStyle(color: Colors.black),
                           ),
                         ),
@@ -692,8 +863,9 @@ class _StudyListScreenState extends State<StudyListScreen>
             ),
           ),
         ),
-      ),
+      ), // ← closes showModalBottomSheet
     );
+
     if (mounted) setState(() => _rulesOpen = false);
   }
 
@@ -711,81 +883,66 @@ class _StudyListScreenState extends State<StudyListScreen>
   }
 
   Future<void> _sendMessageHandler(String text) async {
-    if (text.isEmpty || !mounted) return;
+    final promptText = text.trim();
+    if (promptText.isEmpty && _attachmentUrls.isEmpty) return;
 
-    // If we haven't created a context/card yet, force context‐rules first
     if (_currentContextId == null) {
       _openContextRules();
       return;
     }
 
-    // 1) Show the user's message immediately
-    final messageType = _displaySection == 1 ? 'image_prompt' : 'text';
+    // Add the user's prompt (text + images) to the message list for display
     setState(() {
-      _messages.add({'role': 'user', 'text': text, 'type': messageType});
+      if (promptText.isNotEmpty) {
+        _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
+      }
+      for (final url in _attachmentUrls) {
+        _messages.add({'role': 'user', 'text': url, 'type': 'image'});
+      }
+      _msgCtrl.clear();
     });
-    _msgCtrl.clear();
     _scrollToBottom();
+    setState(() => _isLoading = true);
 
     try {
-      setState(() => _isLoading = true);
+      final functionName = _displaySection == 1 ? 'image-proxy' : 'text-proxy';
+      final response = await Supabase.instance.client.functions.invoke(
+        functionName,
+        body: {'prompt': promptText, 'attachments': _attachmentUrls},
+      );
 
-      // 2) Call the right backend function,
-      //    sending both prompt and attachments list
-      String aiText;
-      String aiType;
-      if (_displaySection == 1) {
-        // Image generation branch
-        final response = await Supabase.instance.client.functions.invoke(
-          'image-proxy',
-          body: {
-            'prompt': text,
-            'attachments': _attachmentUrls, // URLs of uploaded files
-          },
-        );
-        if (response.status != 200) {
-          throw Exception(
-            'Image proxy error ${response.status}: ${response.data}',
-          );
-        }
-        aiText = response.data['response'] as String;
-        aiType = 'image';
-      } else {
-        // Text generation branch (multimodal)
-        final response = await Supabase.instance.client.functions.invoke(
-          'text-proxy',
-          body: {
-            'prompt': text,
-            'attachments': _attachmentUrls, // URLs of uploaded files
-          },
-        );
-        if (response.status != 200) {
-          throw Exception(
-            'Text proxy error ${response.status}: ${response.data}',
-          );
-        }
-        aiText = response.data['response'] as String;
-        aiType = 'text';
+      if (response.status != 200) {
+        final errorData = response.data as Map<String, dynamic>?;
+        final errorMessage = errorData?['error'] ?? 'Unknown AI error';
+        throw Exception(errorMessage);
       }
 
-      if (!mounted) return;
+      final aiResponseType = _displaySection == 1 ? 'image' : 'text';
+      final aiResponseText = response.data['response'] as String;
 
-      // 3) Show the AI's response
+      if (!mounted) return;
       setState(() {
-        _isLoading = false;
-        _messages.add({'role': 'assistant', 'text': aiText, 'type': aiType});
+        _messages.add({
+          'role': 'assistant',
+          'text': aiResponseText,
+          'type': aiResponseType,
+        });
+        _attachmentUrls.clear(); // ✨ FIX: Clear attachments after sending
       });
       _scrollToBottom();
 
-      // 4) ✨ Auto-save the updated conversation
       await SupabaseService.instance.saveCard(
         contextId: _currentContextId!,
         content: {'messages': _messages},
       );
-      print('Card autosaved successfully!');
     } catch (e) {
-      setState(() => _isLoading = false);
-      _showGlassSnackBar('AI error: $e', isError: true);
+      if (mounted) {
+        _showGlassSnackBar(e.toString(), isError: true);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -860,53 +1017,114 @@ class _StudyListScreenState extends State<StudyListScreen>
               ],
             ),
           ),
+          // This replaces the entire SafeArea widget at the end of your build method
           SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
-                  child: Container(
-                    color: const Color.fromRGBO(255, 255, 255, 0.12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // A. Thumbnails row (only when attachments exist)
+                if (_attachmentUrls.isNotEmpty)
+                  Container(
+                    height: 80,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
-                      vertical: 6,
+                      vertical: 4,
                     ),
-                    child: Row(
-                      children: [
-                        InkWell(
-                          onTap: _openCardActionsMenu,
-                          child: const Icon(
-                            Icons.add,
-                            color: Colors.cyanAccent,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: TextField(
-                            controller: _msgCtrl,
-                            decoration: const InputDecoration(
-                              hintText: 'Test my power...',
-                              border: InputBorder.none,
-                              hintStyle: TextStyle(
-                                color: Color.fromRGBO(255, 255, 255, 0.5),
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _attachmentUrls.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (_, idx) {
+                        final url = _attachmentUrls[idx];
+                        return Stack(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.network(
+                                url,
+                                width: 80,
+                                height: 80,
+                                fit: BoxFit.cover,
                               ),
                             ),
-                            onSubmitted: _sendMessageHandler,
-                            style: const TextStyle(color: Colors.white),
-                            textInputAction: TextInputAction.send,
-                          ),
+                            // Remove button
+                            Positioned(
+                              top: 2,
+                              right: 2,
+                              child: GestureDetector(
+                                onTap: () {
+                                  setState(() {
+                                    _attachmentUrls.removeAt(idx);
+                                  });
+                                },
+                                child: const CircleAvatar(
+                                  radius: 10,
+                                  backgroundColor: Colors.black54,
+                                  child: Icon(
+                                    Icons.close,
+                                    size: 14,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+
+                // B. The original prompt + send row
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(24),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+                      child: Container(
+                        color: const Color.fromRGBO(255, 255, 255, 0.12),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.send, color: Colors.white),
-                          onPressed: () => _sendMessageHandler(_msgCtrl.text),
+                        child: Row(
+                          children: [
+                            InkWell(
+                              onTap: _openCardActionsMenu,
+                              child: const Icon(
+                                Icons.add,
+                                color: Colors.cyanAccent,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: TextField(
+                                controller: _msgCtrl,
+                                decoration: const InputDecoration(
+                                  hintText: 'Type your question here…',
+                                  border: InputBorder.none,
+                                  hintStyle: TextStyle(color: Colors.white54),
+                                ),
+                                onSubmitted: _sendMessageHandler,
+                                style: const TextStyle(color: Colors.white),
+                                textInputAction: TextInputAction.send,
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.send, color: Colors.white),
+                              onPressed: () =>
+                                  _sendMessageHandler(_msgCtrl.text),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
             ),
           ),
         ],
@@ -940,15 +1158,51 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
-  /// (2) Replace entire _buildCardContent with:
+  /// Sends the given text to Speechify and plays the returned audio.
+  Future<void> _readAloud(String text) async {
+    final uri = Uri.parse('https://api.speechify.com/v1/tts');
+    try {
+      // Optional: let user know we’re generating audio
+      _showGlassSnackBar('Generating audio…');
+
+      final resp = await http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+          // ✅ Load this from your .env with flutter_dotenv, don't hardcode!
+          'Authorization': 'Bearer ${dotenv.env['SPEECHIFY_API_KEY']}',
+        },
+        body: jsonEncode({'voice': 'alloy', 'text': text}),
+      );
+
+      if (resp.statusCode != 200) {
+        final err = jsonDecode(resp.body);
+        final msg = err['error']?['message'] ?? 'TTS failed';
+        _showGlassSnackBar('$msg (${resp.statusCode})', isError: true);
+        return;
+      }
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final audioUrl = data['audioUrl'] as String?;
+      if (audioUrl == null) {
+        _showGlassSnackBar('No audio URL returned.', isError: true);
+        return;
+      }
+
+      final player = AudioPlayer();
+      // In audioplayers 5.x+, URLs are wrapped in UrlSource:
+      await player.play(UrlSource(audioUrl));
+    } catch (e) {
+      _showGlassSnackBar('TTS error: $e', isError: true);
+    }
+  }
+
+  /// Builds the chat bubbles with action icons under assistant messages.
   Widget _buildCardContent(int pageIndex) {
-    // If in DIAGRAM tab with no messages, show our placeholder
     if (pageIndex == 1 && _messages.isEmpty && !_isLoading) {
       return _buildDiagramPlaceholder();
     }
-
     if (_messages.isEmpty && !_isLoading) {
-      // existing “no messages” for TEXT/CODE
       return Center(
         child: Text(
           'No messages yet.\nStart a new conversation!',
@@ -970,7 +1224,6 @@ class _StudyListScreenState extends State<StudyListScreen>
 
         Widget content;
         if (type == 'image') {
-          // your existing Image.network branch
           content = Image.network(
             text,
             loadingBuilder: (c, child, prog) => prog == null
@@ -980,7 +1233,6 @@ class _StudyListScreenState extends State<StudyListScreen>
                 const Icon(Icons.error_outline, color: Colors.redAccent),
           );
         } else {
-          // user or assistant text bubble
           content = SelectableText(
             text,
             style: TextStyle(color: isUser ? Colors.black : Colors.white),
@@ -993,7 +1245,7 @@ class _StudyListScreenState extends State<StudyListScreen>
             constraints: BoxConstraints(
               maxWidth: MediaQuery.of(context).size.width * 0.75,
             ),
-            margin: const EdgeInsets.symmetric(vertical: 4),
+            margin: const EdgeInsets.symmetric(vertical: 8),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: isUser
@@ -1001,7 +1253,71 @@ class _StudyListScreenState extends State<StudyListScreen>
                   : const Color.fromRGBO(255, 255, 255, 0.15),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: content,
+            child: Column(
+              crossAxisAlignment: isUser
+                  ? CrossAxisAlignment.end
+                  : CrossAxisAlignment.start,
+              children: [
+                content,
+                if (!isUser) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(
+                          Icons.copy,
+                          size: 20,
+                          color: Colors.white70,
+                        ),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: text));
+                          _showGlassSnackBar('Copied to clipboard');
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.volume_up,
+                          size: 20,
+                          color: Colors.white70,
+                        ),
+                        onPressed: () => _readAloud(text),
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.share,
+                          size: 20,
+                          color: Colors.white70,
+                        ),
+                        onPressed: () => Share.share(text),
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.favorite_border,
+                          size: 20,
+                          color: Colors.white70,
+                        ),
+                        onPressed: () {
+                          // implement your "save favorite" logic here
+                          _showGlassSnackBar('Saved to favorites');
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(
+                          Icons.delete_outline,
+                          size: 20,
+                          color: Colors.white70,
+                        ),
+                        onPressed: () {
+                          setState(() => _messages.removeAt(index));
+                          _showGlassSnackBar('Message deleted');
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
           ),
         );
       },
