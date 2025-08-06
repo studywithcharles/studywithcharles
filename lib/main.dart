@@ -15,31 +15,35 @@ import 'package:studywithcharles/features/home/presentation/main_screen.dart';
 /// Supabase client
 final supabase = Supabase.instance.client;
 
+// lib/main.dart
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Load environment variables
   await dotenv.load(fileName: '.env');
 
+  // Initialize Firebase FIRST
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+
+  // Initialize Supabase SECOND
   await Supabase.initialize(
     url: dotenv.env['SUPABASE_URL']!,
     anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
   );
 
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  // --- THIS IS THE CORRECT WAY TO LINK FIREBASE AUTH TO SUPABASE ---
+  // It listens for login/logout and automatically updates the token for database requests.
+  fb_auth.FirebaseAuth.instance.idTokenChanges().listen((user) async {
+    final token = await user?.getIdToken();
 
-  AuthService.instance.authStateChanges().listen((firebaseUser) async {
-    if (firebaseUser != null) {
-      final token = await firebaseUser.getIdToken();
-      if (token != null) {
-        try {
-          await supabase.auth.setSession(token);
-        } catch (e) {
-          // You can add logging here if you want
-        }
-      }
-    } else {
-      await supabase.auth.signOut();
-    }
+    // This updates the authorization header for ALL future Supabase requests.
+    // It does NOT use supabase.auth.
+    Supabase.instance.client.headers.update(
+      'Authorization',
+      (value) => 'Bearer ${token ?? ''}',
+      ifAbsent: () => 'Bearer ${token ?? ''}',
+    );
   });
 
   runApp(const StudyWithCharlesApp());

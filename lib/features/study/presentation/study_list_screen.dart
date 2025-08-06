@@ -4,16 +4,15 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart'; // for Clipboard
+import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart'; // add to pubspec.yaml
 import 'package:http/http.dart' as http; // add to pubspec.yaml
 import 'package:audioplayers/audioplayers.dart';
-import 'package:studywithcharles/shared/utils/permissions.dart';
 import 'package:studywithcharles/shared/services/auth_service.dart';
 import 'package:studywithcharles/shared/services/supabase_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:studywithcharles/shared/widgets/typing_indicator.dart';
 
 class StudyListScreen extends StatefulWidget {
   static const routeName = '/study';
@@ -28,6 +27,7 @@ class _StudyListScreenState extends State<StudyListScreen>
   int _displaySection = 0;
   bool _rulesOpen = false;
   String? _currentContextId;
+  bool _showScrollToBottomButton = false;
 
   bool _isLoading = true;
   List<Map<String, dynamic>> _savedContexts = [];
@@ -37,33 +37,46 @@ class _StudyListScreenState extends State<StudyListScreen>
   final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _scroll = ScrollController();
   final List<String> _attachmentUrls = [];
+  final List<String> _permanentAttachmentUrls = [];
 
   final TextEditingController _titleCtl = TextEditingController();
   String _selectedFormat = 'Summarize';
   final TextEditingController _moreCtl = TextEditingController();
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // We no longer need to clear the state when the app is paused.
+    // This prevents the card from resetting when you pick an image.
+  }
+
+  @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadInitialData();
+
+    // show/hide FAB when user scrolls
+    _scroll.addListener(() {
+      final atBottom =
+          _scroll.position.pixels >= _scroll.position.maxScrollExtent - 100;
+      if (_showScrollToBottomButton == atBottom) {
+        setState(() {
+          _showScrollToBottomButton = !atBottom;
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _scroll.removeListener(() {});
     _msgCtrl.dispose();
     _scroll.dispose();
     _pageCtrl.dispose();
     _titleCtl.dispose();
     _moreCtl.dispose();
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // We no longer need to clear the state when the app is paused.
-    // This prevents the card from resetting when you pick an image.
   }
 
   Future<void> _loadInitialData() async {
@@ -323,17 +336,30 @@ class _StudyListScreenState extends State<StudyListScreen>
 
   /// Smart helper for picking, uploading, and queuing an attachment URL.
   Future<void> _handleFileUpload(ImageSource source) async {
-    // 0️⃣ Ensure camera & storage permissions first
-    final granted = await ensureStorageAndCameraPermissions();
-    if (!granted) {
+    // 0️⃣ Request the right permission
+    Permission permission;
+    if (source == ImageSource.camera) {
+      permission = Permission.camera;
+    } else {
+      // On Android Q+ scoped storage, READ_EXTERNAL_STORAGE is enough.
+      // On Android 13+, you might consider Permission.photos or Permission.videos,
+      // but READ_EXTERNAL_STORAGE will cover gallery.
+      permission =
+          Permission.photos; // covers images on iOS, will fallback on Android
+    }
+
+    final status = await permission.request();
+    if (!status.isGranted) {
       _showGlassSnackBar(
-        'Camera & storage permissions are required to attach images.',
+        source == ImageSource.camera
+            ? 'Camera permission is required to take photos.'
+            : 'Storage permission is required to select images.',
         isError: true,
       );
       return;
     }
 
-    // 1️⃣ Close the bottom sheet immediately.
+    // 1️⃣ Close the sheet immediately.
     Navigator.of(context).pop();
 
     // 2️⃣ Prevent more than 3 attachments.
@@ -342,7 +368,7 @@ class _StudyListScreenState extends State<StudyListScreen>
       return;
     }
 
-    // 3️⃣ If this is a brand-new card, create it first.
+    // 3️⃣ Ensure context exists
     if (_currentContextId == null) {
       _showGlassSnackBar('Creating new card...');
       try {
@@ -584,7 +610,8 @@ class _StudyListScreenState extends State<StudyListScreen>
     }
   }
 
-  /// Opens your context‐rules modal, now with image + file picking (50 MB limit) and permission checks.
+  /// Opens your context‐rules modal, now with image + file picking (50 MB limit),
+  /// permission checks, and a preview of permanently attached images.
   void _openContextRules() async {
     setState(() => _rulesOpen = true);
 
@@ -675,31 +702,14 @@ class _StudyListScreenState extends State<StudyListScreen>
                         'Add Photo/Video',
                         style: TextStyle(color: Colors.white70),
                       ),
-                      onPressed: () async {
-                        // Permissions
-                        final ok = await ensureStorageAndCameraPermissions();
-                        if (!ok) {
-                          _showGlassSnackBar(
-                            'Camera & storage permissions are required.',
-                            isError: true,
-                          );
-                          return;
-                        }
-                        // Ensure context exists
-                        if (_currentContextId == null) {
-                          _showGlassSnackBar(
-                            'Please tap “Save” first to create the card before adding attachments.',
-                            isError: true,
-                          );
-                          return;
-                        }
-                        // Delegate to image flow
+                      onPressed: () {
+                        Navigator.of(context).pop();
                         _openCardActionsMenu();
                       },
                     ),
                     const SizedBox(height: 8),
 
-                    // Attach arbitrary file up to 50 MB
+                    // Attach arbitrary file
                     OutlinedButton.icon(
                       icon: const Icon(
                         Icons.attach_file,
@@ -709,69 +719,33 @@ class _StudyListScreenState extends State<StudyListScreen>
                         'Attach File',
                         style: TextStyle(color: Colors.white70),
                       ),
-                      onPressed: () async {
-                        // Permissions
-                        final ok = await ensureStorageAndCameraPermissions();
-                        if (!ok) {
-                          _showGlassSnackBar(
-                            'Storage permission is required to attach files.',
-                            isError: true,
-                          );
-                          return;
-                        }
-                        // Ensure context exists
-                        if (_currentContextId == null) {
-                          _showGlassSnackBar(
-                            'Please tap “Save” first to create the card before adding attachments.',
-                            isError: true,
-                          );
-                          return;
-                        }
-                        // Pick file
-                        final result = await FilePicker.platform.pickFiles(
-                          withData: true,
-                        );
-                        if (result == null) return; // cancelled
-                        final fileBytes = result.files.single.bytes;
-                        final fileName = result.files.single.name;
-                        if (fileBytes == null) {
-                          _showGlassSnackBar(
-                            'Unable to read file.',
-                            isError: true,
-                          );
-                          return;
-                        }
-                        // Size check
-                        final sizeMB = fileBytes.lengthInBytes / (1024 * 1024);
-                        if (sizeMB > 50) {
-                          _showGlassSnackBar(
-                            'File must be ≤ 50 MB.',
-                            isError: true,
-                          );
-                          return;
-                        }
-                        // Upload
-                        _showGlassSnackBar('Uploading file…');
-                        try {
-                          final tempDir = (await getTemporaryDirectory()).path;
-                          final tempFile = File('$tempDir/$fileName')
-                            ..writeAsBytesSync(fileBytes);
-                          final url = await SupabaseService.instance
-                              .uploadAttachment(tempFile);
-                          await SupabaseService.instance.addContextAttachment(
-                            contextId: _currentContextId!,
-                            url: url,
-                          );
-                          _showGlassSnackBar('File attached!');
-                        } catch (e) {
-                          _showGlassSnackBar(
-                            'File upload failed: $e',
-                            isError: true,
-                          );
-                        }
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        _openCardActionsMenu(); // reuse same menu for files
                       },
                     ),
                     const SizedBox(height: 12),
+
+                    // 📸 Permanent attachments preview
+                    if (_attachmentUrls.isNotEmpty)
+                      SizedBox(
+                        height: 60,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _attachmentUrls.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 8),
+                          itemBuilder: (_, i) => ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.network(
+                              _attachmentUrls[i],
+                              width: 60,
+                              height: 60,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (_attachmentUrls.isNotEmpty) const SizedBox(height: 16),
 
                     // More Context
                     TextField(
@@ -802,33 +776,9 @@ class _StudyListScreenState extends State<StudyListScreen>
                         ElevatedButton(
                           onPressed: _titleCtl.text.trim().isEmpty
                               ? null
-                              : () async {
-                                  try {
-                                    if (_currentContextId == null) {
-                                      final id = await SupabaseService.instance
-                                          .createContext(
-                                            title: _titleCtl.text.trim(),
-                                            resultFormat: _selectedFormat,
-                                            moreContext:
-                                                _moreCtl.text.trim().isEmpty
-                                                ? null
-                                                : _moreCtl.text.trim(),
-                                          );
-                                      if (!mounted) return;
-                                      setState(() => _currentContextId = id);
-                                      _showGlassSnackBar(
-                                        'Context saved! You can now add attachments.',
-                                      );
-                                    }
-                                    Navigator.of(context).pop();
-                                  } catch (e) {
-                                    if (mounted) {
-                                      _showGlassSnackBar(
-                                        'Error saving context: $e',
-                                        isError: true,
-                                      );
-                                    }
-                                  }
+                              : () {
+                                  Navigator.of(context).pop();
+                                  _saveContextRules();
                                 },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.cyanAccent,
@@ -846,10 +796,60 @@ class _StudyListScreenState extends State<StudyListScreen>
             ),
           ),
         ),
-      ), // ← closes showModalBottomSheet
+      ),
     );
 
     if (mounted) setState(() => _rulesOpen = false);
+  }
+
+  Future<void> _saveContextRules() async {
+    // If the card already exists, we just update it.
+    if (_currentContextId != null) {
+      // --- FIX IS HERE ---
+      // Changed the parameter name from 'contextId' to 'id' to match your service.
+      await SupabaseService.instance.updateContext(
+        id: _currentContextId!,
+        title: _titleCtl.text.trim(),
+        resultFormat: _selectedFormat,
+        moreContext: _moreCtl.text.trim(),
+      );
+      _showGlassSnackBar('Context updated!');
+      return;
+    }
+
+    // Logic for creating a new card
+    setState(() => _isLoading = true);
+    try {
+      final id = await SupabaseService.instance.createContext(
+        title: _titleCtl.text.trim().isEmpty
+            ? 'Untitled Card'
+            : _titleCtl.text.trim(),
+        resultFormat: _selectedFormat,
+        moreContext: _moreCtl.text.trim().isEmpty ? null : _moreCtl.text.trim(),
+      );
+
+      // Link any temporary attachments that were added *before* this first save
+      for (final url in _attachmentUrls) {
+        await SupabaseService.instance.addContextAttachment(
+          contextId: id,
+          url: url,
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _currentContextId = id;
+        // Move temporary attachments to permanent ones for display in the popup
+        _permanentAttachmentUrls.addAll(_attachmentUrls);
+        _attachmentUrls.clear();
+      });
+
+      _showGlassSnackBar('Context saved! You can now ask questions.');
+    } catch (e) {
+      _showGlassSnackBar('Error saving context: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
   }
 
   /// Smoothly scrolls your ListView to the bottom after new messages.
@@ -867,38 +867,59 @@ class _StudyListScreenState extends State<StudyListScreen>
 
   Future<void> _sendMessageHandler(String text) async {
     final promptText = text.trim();
+    // Nothing to do if they didn't type and didn't attach
     if (promptText.isEmpty && _attachmentUrls.isEmpty) return;
 
+    // Make sure the user has saved their Context RULES
     if (_currentContextId == null) {
       _openContextRules();
       return;
     }
 
-    // ✨ 1) COPY your attachments BEFORE clearing them
-    final attachmentsToSend = List<String>.from(_attachmentUrls);
+    // Copy out the attachments they've just queued up
+    final attachmentsForThisMessage = List<String>.from(_attachmentUrls);
 
-    // 2) Update the UI with the user's message + preview, then clear the bar
+    // Optimistically update the UI with user message(s) + typing indicator
     setState(() {
       if (promptText.isNotEmpty) {
         _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
       }
-      for (final url in attachmentsToSend) {
+      for (final url in attachmentsForThisMessage) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
       }
+      // Our temporary “typing” indicator
+      _messages.add({'role': 'assistant', 'text': '', 'type': 'typing'});
+
       _msgCtrl.clear();
       _attachmentUrls.clear();
     });
     _scrollToBottom();
 
-    // 3) Show loading spinner
-    setState(() => _isLoading = true);
-
     try {
-      // 4) Send message + the COPIED list of attachments
+      // 1️⃣ Load any attachments permanently saved to this card
+      final permanentAttachments = await SupabaseService.instance
+          .fetchContextAttachments(_currentContextId!);
+
+      // 2️⃣ Build a rich payload for your edge function
+      final payload = {
+        'prompt': promptText,
+        'chat_history': _messages.sublist(0, _messages.length - 1),
+        'attachments': {
+          'session': attachmentsForThisMessage, // new files just sent
+          'context': permanentAttachments, // files saved on card
+        },
+        'context_rules': {
+          'title': _titleCtl.text.trim(),
+          'result_format': _selectedFormat,
+          'more_context': _moreCtl.text.trim(),
+        },
+      };
+
+      // 3️⃣ Call the right function (text or image)
       final functionName = _displaySection == 1 ? 'image-proxy' : 'text-proxy';
       final response = await Supabase.instance.client.functions.invoke(
         functionName,
-        body: {'prompt': promptText, 'attachments': attachmentsToSend},
+        body: payload,
       );
 
       if (response.status != 200) {
@@ -907,32 +928,28 @@ class _StudyListScreenState extends State<StudyListScreen>
         throw Exception(errorMessage);
       }
 
-      final aiResponseType = _displaySection == 1 ? 'image' : 'text';
-      final aiResponseText = response.data['response'] as String;
+      final aiType = _displaySection == 1 ? 'image' : 'text';
+      final aiText = response.data['response'] as String;
 
       if (!mounted) return;
 
-      // 5) Show the AI’s reply
+      // 4️⃣ Replace typing indicator with the real reply
       setState(() {
-        _messages.add({
-          'role': 'assistant',
-          'text': aiResponseText,
-          'type': aiResponseType,
-        });
+        _messages.removeLast();
+        _messages.add({'role': 'assistant', 'text': aiText, 'type': aiType});
       });
       _scrollToBottom();
 
-      // 6) Save the updated conversation back to Supabase
+      // 5️⃣ Persist the full, updated conversation
       await SupabaseService.instance.saveCard(
         contextId: _currentContextId!,
         content: {'messages': _messages},
       );
     } catch (e) {
-      if (mounted) {
-        _showGlassSnackBar(e.toString(), isError: true);
-      }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (!mounted) return;
+      // Remove typing indicator and show error
+      setState(() => _messages.removeLast());
+      _showGlassSnackBar(e.toString(), isError: true);
     }
   }
 
@@ -958,6 +975,7 @@ class _StudyListScreenState extends State<StudyListScreen>
       ),
       body: Column(
         children: [
+          // Top segment picker
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Center(
@@ -990,9 +1008,12 @@ class _StudyListScreenState extends State<StudyListScreen>
               ),
             ),
           ),
+
+          // Main content + FAB overlay
           Expanded(
             child: Stack(
               children: [
+                // PageView of chat / diagram / code
                 PageView(
                   controller: _pageCtrl,
                   onPageChanged: (idx) => setState(() => _displaySection = idx),
@@ -1002,17 +1023,43 @@ class _StudyListScreenState extends State<StudyListScreen>
                     _buildCardContent(2),
                   ],
                 ),
+
+                // Loading spinner
                 if (_isLoading)
                   const Center(child: CircularProgressIndicator()),
+
+                // --- CHANGE IS HERE ---
+                // Scroll-to-bottom FAB (centered and styled)
+                if (_showScrollToBottomButton)
+                  Positioned(
+                    // You can change left/right to just 'right: 20' to align it right
+                    left: 0,
+                    right: 0,
+                    bottom: 10,
+                    child: Center(
+                      child: FloatingActionButton(
+                        mini: true,
+                        // Set background to a semi-transparent black
+                        backgroundColor: Colors.black.withOpacity(0.7),
+                        onPressed: _scrollToBottom,
+                        child: const Icon(
+                          Icons.arrow_downward,
+                          // Set icon color to white
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
-          // This replaces the entire SafeArea widget at the end of your build method
+
+          // Attachments preview + input row
           SafeArea(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // A. Thumbnails row (only when attachments exist)
+                // A. Thumbnails row
                 if (_attachmentUrls.isNotEmpty)
                   Container(
                     height: 80,
@@ -1037,7 +1084,6 @@ class _StudyListScreenState extends State<StudyListScreen>
                                 fit: BoxFit.cover,
                               ),
                             ),
-                            // Remove button
                             Positioned(
                               top: 2,
                               right: 2,
@@ -1064,7 +1110,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                     ),
                   ),
 
-                // B. The original prompt + send row
+                // B. Input row
                 Padding(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
@@ -1094,7 +1140,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                               child: TextField(
                                 controller: _msgCtrl,
                                 decoration: const InputDecoration(
-                                  hintText: 'Test my power…',
+                                  hintText: 'Type your question here…',
                                   border: InputBorder.none,
                                   hintStyle: TextStyle(color: Colors.white54),
                                 ),
@@ -1213,12 +1259,13 @@ class _StudyListScreenState extends State<StudyListScreen>
     }
   }
 
-  /// 2) Chat bubble builder: removed favorite & delete icons
+  /// 2) Chat bubble builder: now includes a typing indicator
   Widget _buildCardContent(int pageIndex) {
-    if (pageIndex == 1 && _messages.isEmpty && !_isLoading) {
+    if (pageIndex == 1 && _messages.isEmpty) {
       return _buildDiagramPlaceholder();
     }
-    if (_messages.isEmpty && !_isLoading) {
+    // We remove the !_isLoading check here because the list now handles its own loading state
+    if (_messages.isEmpty) {
       return Center(
         child: Text(
           'No messages yet.\nStart a new conversation!',
@@ -1238,6 +1285,15 @@ class _StudyListScreenState extends State<StudyListScreen>
         final type = msg['type'] ?? 'text';
         final text = msg['text'] ?? '';
 
+        // --- CHANGE IS HERE ---
+        // If the message type is "typing", show the loading indicator.
+        if (type == 'typing') {
+          return const Align(
+            alignment: Alignment.centerLeft,
+            child: TypingIndicator(), // We'll create this widget next
+          );
+        }
+
         Widget content = type == 'image'
             ? Image.network(
                 text,
@@ -1252,65 +1308,68 @@ class _StudyListScreenState extends State<StudyListScreen>
                 style: TextStyle(color: isUser ? Colors.black : Colors.white),
               );
 
-        return Align(
-          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-          child: Container(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.75,
+        return Column(
+          crossAxisAlignment: isUser
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
+          children: [
+            Align(
+              alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+              child: Container(
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.of(context).size.width * 0.75,
+                ),
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: isUser
+                      ? Colors.cyanAccent
+                      : const Color.fromRGBO(255, 255, 255, 0.15),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: content,
+              ),
             ),
-            margin: const EdgeInsets.symmetric(vertical: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: isUser
-                  ? Colors.cyanAccent
-                  : const Color.fromRGBO(255, 255, 255, 0.15),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Column(
-              crossAxisAlignment: isUser
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.start,
-              children: [
-                content,
-                if (!isUser) ...[
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(
-                          Icons.copy,
-                          size: 20,
-                          color: Colors.white70,
-                        ),
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: text));
-                          _showGlassSnackBar('Copied to clipboard');
-                        },
+            if (!isUser)
+              Padding(
+                padding: const EdgeInsets.only(left: 12.0, top: 4.0),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(
+                        Icons.copy,
+                        size: 20,
+                        color: Colors.white70,
                       ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.volume_up,
-                          size: 20,
-                          color: Colors.white70,
-                        ),
-                        onPressed: () => _readAloud(text),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: text));
+                        _showGlassSnackBar('Copied to clipboard');
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.volume_up,
+                        size: 20,
+                        color: Colors.white70,
                       ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.share,
-                          size: 20,
-                          color: Colors.white70,
-                        ),
-                        onPressed: () => Share.share(text),
+                      onPressed: () => _readAloud(text),
+                    ),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.share,
+                        size: 20,
+                        color: Colors.white70,
                       ),
-                      // favorite & delete removed
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
+                      onPressed: () => Share.share(text),
+                    ),
+                  ],
+                ),
+              ),
+          ],
         );
       },
     );
