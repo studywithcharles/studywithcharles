@@ -200,6 +200,7 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
+  /// 1) Loading a saved card: clear attachments only once
   void _openSavedCardsList() {
     showModalBottomSheet(
       context: context,
@@ -235,40 +236,25 @@ class _StudyListScreenState extends State<StudyListScreen>
                             style: const TextStyle(color: Colors.white),
                           ),
                           onTap: () async {
-                            Navigator.of(context).pop(); // close the sheet
+                            Navigator.of(context).pop();
                             setState(() => _isLoading = true);
-
                             try {
-                              // Find the full context data from the already loaded list
                               final fullContextData = _savedContexts.firstWhere(
                                 (c) => c['id'] == id,
                               );
-
                               final messages = await SupabaseService.instance
                                   .fetchCards(id);
-                              final attachments = await SupabaseService.instance
-                                  .fetchContextAttachments(id);
-
                               if (!mounted) return;
                               setState(() {
                                 _currentContextId = id;
                                 _messages.clear();
-                                _attachmentUrls.clear();
-
-                                // ✨ FIX: Populate the context rule fields in the UI
+                                _attachmentUrls.clear(); // cleared here
                                 _titleCtl.text = fullContextData['title'] ?? '';
                                 _selectedFormat =
                                     fullContextData['result_format'] ??
                                     'Summarize';
                                 _moreCtl.text =
                                     fullContextData['more_context'] ?? '';
-
-                                for (final att in attachments) {
-                                  _attachmentUrls.add(
-                                    att['attachment_url'] as String,
-                                  );
-                                }
-
                                 for (final m in messages) {
                                   _messages.add({
                                     'role': m['role'] ?? 'assistant',
@@ -283,9 +269,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                                 isError: true,
                               );
                             } finally {
-                              if (mounted) {
-                                setState(() => _isLoading = false);
-                              }
+                              if (mounted) setState(() => _isLoading = false);
                             }
                           },
                           trailing: IconButton(
@@ -293,40 +277,8 @@ class _StudyListScreenState extends State<StudyListScreen>
                               Icons.delete,
                               color: Colors.redAccent,
                             ),
-                            onPressed: () async {
-                              final confirm = await showDialog<bool>(
-                                context: context,
-                                builder: (_) => AlertDialog(
-                                  title: const Text('Delete saved card?'),
-                                  content: Text(
-                                    'Are you sure you want to delete "$title"?',
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.pop(context, false),
-                                      child: const Text('Cancel'),
-                                    ),
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.pop(context, true),
-                                      child: const Text(
-                                        'Delete',
-                                        style: TextStyle(color: Colors.red),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                              if (confirm == true) {
-                                await SupabaseService.instance.deleteContext(
-                                  id,
-                                );
-                                _showGlassSnackBar('Deleted "$title"');
-                                if (mounted) Navigator.of(context).pop();
-                                await _loadInitialData();
-                              }
-                            },
+                            onPressed: () =>
+                                _confirmDelete(ctx['id'] as String, title),
                           ),
                         );
                       },
@@ -336,6 +288,37 @@ class _StudyListScreenState extends State<StudyListScreen>
         ),
       ),
     );
+  }
+
+  /// Shows a “delete this card?” dialog, deletes it if confirmed,
+  /// then refreshes the list.
+  Future<void> _confirmDelete(String contextId, String title) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete saved card?'),
+        content: Text('Are you sure you want to delete "$title"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldDelete == true) {
+      await SupabaseService.instance.deleteContext(contextId);
+      _showGlassSnackBar('Deleted "$title"');
+      // If sheet is still open, close it
+      if (Navigator.canPop(context)) Navigator.pop(context);
+      // Refresh
+      await _loadInitialData();
+    }
   }
 
   /// Smart helper for picking, uploading, and queuing an attachment URL.
@@ -891,24 +874,31 @@ class _StudyListScreenState extends State<StudyListScreen>
       return;
     }
 
-    // Add the user's prompt (text + images) to the message list for display
+    // ✨ 1) COPY your attachments BEFORE clearing them
+    final attachmentsToSend = List<String>.from(_attachmentUrls);
+
+    // 2) Update the UI with the user's message + preview, then clear the bar
     setState(() {
       if (promptText.isNotEmpty) {
         _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
       }
-      for (final url in _attachmentUrls) {
+      for (final url in attachmentsToSend) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
       }
       _msgCtrl.clear();
+      _attachmentUrls.clear();
     });
     _scrollToBottom();
+
+    // 3) Show loading spinner
     setState(() => _isLoading = true);
 
     try {
+      // 4) Send message + the COPIED list of attachments
       final functionName = _displaySection == 1 ? 'image-proxy' : 'text-proxy';
       final response = await Supabase.instance.client.functions.invoke(
         functionName,
-        body: {'prompt': promptText, 'attachments': _attachmentUrls},
+        body: {'prompt': promptText, 'attachments': attachmentsToSend},
       );
 
       if (response.status != 200) {
@@ -921,16 +911,18 @@ class _StudyListScreenState extends State<StudyListScreen>
       final aiResponseText = response.data['response'] as String;
 
       if (!mounted) return;
+
+      // 5) Show the AI’s reply
       setState(() {
         _messages.add({
           'role': 'assistant',
           'text': aiResponseText,
           'type': aiResponseType,
         });
-        _attachmentUrls.clear(); // ✨ FIX: Clear attachments after sending
       });
       _scrollToBottom();
 
+      // 6) Save the updated conversation back to Supabase
       await SupabaseService.instance.saveCard(
         contextId: _currentContextId!,
         content: {'messages': _messages},
@@ -940,9 +932,7 @@ class _StudyListScreenState extends State<StudyListScreen>
         _showGlassSnackBar(e.toString(), isError: true);
       }
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -1104,7 +1094,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                               child: TextField(
                                 controller: _msgCtrl,
                                 decoration: const InputDecoration(
-                                  hintText: 'Type your question here…',
+                                  hintText: 'Test my power…',
                                   border: InputBorder.none,
                                   hintStyle: TextStyle(color: Colors.white54),
                                 ),
@@ -1158,46 +1148,72 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
-  /// Sends the given text to Speechify and plays the returned audio.
+  /// Sends the given `text` to Speechify’s TTS API and plays back the result.
+  /// Uses your SPEECHIFY_API_KEY (and optional SPEECHIFY_VOICE_ID) from `.env`.
+  /// Sends the given text to Speechify’s TTS API and plays back the result.
   Future<void> _readAloud(String text) async {
-    final uri = Uri.parse('https://api.speechify.com/v1/tts');
-    try {
-      // Optional: let user know we’re generating audio
-      _showGlassSnackBar('Generating audio…');
+    final apiKey = dotenv.env['SPEECHIFY_API_KEY'];
+    if (apiKey == null || apiKey.isEmpty) {
+      _showGlassSnackBar(
+        'Missing SPEECHIFY_API_KEY in your .env file.',
+        isError: true,
+      );
+      return;
+    }
 
+    final uri = Uri.parse('https://api.sws.speechify.com/v1/audio/speech');
+    _showGlassSnackBar('Generating audio…');
+
+    try {
       final resp = await http.post(
         uri,
         headers: {
           'Content-Type': 'application/json',
-          // ✅ Load this from your .env with flutter_dotenv, don't hardcode!
-          'Authorization': 'Bearer ${dotenv.env['SPEECHIFY_API_KEY']}',
+          'Authorization': 'Bearer $apiKey',
         },
-        body: jsonEncode({'voice': 'alloy', 'text': text}),
+        body: jsonEncode({
+          'input': text,
+          'voice_id':
+              dotenv.env['SPEECHIFY_VOICE_ID'] ??
+              'Matthew', // Using a high-quality default
+          // ✨ FIX: Request the more compatible MP3 format instead of WAV
+          'audio_format': 'mp3',
+        }),
       );
 
       if (resp.statusCode != 200) {
-        final err = jsonDecode(resp.body);
-        final msg = err['error']?['message'] ?? 'TTS failed';
-        _showGlassSnackBar('$msg (${resp.statusCode})', isError: true);
+        var err = 'TTS failed (${resp.statusCode})';
+        try {
+          final json = jsonDecode(resp.body);
+          if (json['error']?['message'] != null) {
+            err = '${json['error']['message']} (${resp.statusCode})';
+          }
+        } catch (_) {}
+        _showGlassSnackBar(err, isError: true);
         return;
       }
 
-      final data = jsonDecode(resp.body) as Map<String, dynamic>;
-      final audioUrl = data['audioUrl'] as String?;
-      if (audioUrl == null) {
-        _showGlassSnackBar('No audio URL returned.', isError: true);
+      final Map<String, dynamic> data = jsonDecode(resp.body);
+      final String? b64 = data['audio_data'] as String?;
+
+      if (b64 == null) {
+        _showGlassSnackBar('API did not return audio data.', isError: true);
         return;
       }
 
+      final bytes = base64Decode(b64);
       final player = AudioPlayer();
-      // In audioplayers 5.x+, URLs are wrapped in UrlSource:
-      await player.play(UrlSource(audioUrl));
+
+      // BytesSource works perfectly with MP3 data
+      await player.play(BytesSource(bytes));
+    } on SocketException {
+      _showGlassSnackBar('TTS Error: No internet connection.', isError: true);
     } catch (e) {
-      _showGlassSnackBar('TTS error: $e', isError: true);
+      _showGlassSnackBar('TTS Error: $e', isError: true);
     }
   }
 
-  /// Builds the chat bubbles with action icons under assistant messages.
+  /// 2) Chat bubble builder: removed favorite & delete icons
   Widget _buildCardContent(int pageIndex) {
     if (pageIndex == 1 && _messages.isEmpty && !_isLoading) {
       return _buildDiagramPlaceholder();
@@ -1222,22 +1238,19 @@ class _StudyListScreenState extends State<StudyListScreen>
         final type = msg['type'] ?? 'text';
         final text = msg['text'] ?? '';
 
-        Widget content;
-        if (type == 'image') {
-          content = Image.network(
-            text,
-            loadingBuilder: (c, child, prog) => prog == null
-                ? child
-                : const Center(child: CircularProgressIndicator()),
-            errorBuilder: (c, _, __) =>
-                const Icon(Icons.error_outline, color: Colors.redAccent),
-          );
-        } else {
-          content = SelectableText(
-            text,
-            style: TextStyle(color: isUser ? Colors.black : Colors.white),
-          );
-        }
+        Widget content = type == 'image'
+            ? Image.network(
+                text,
+                loadingBuilder: (c, child, prog) => prog == null
+                    ? child
+                    : const Center(child: CircularProgressIndicator()),
+                errorBuilder: (c, _, __) =>
+                    const Icon(Icons.error_outline, color: Colors.redAccent),
+              )
+            : SelectableText(
+                text,
+                style: TextStyle(color: isUser ? Colors.black : Colors.white),
+              );
 
         return Align(
           alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -1291,28 +1304,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                         ),
                         onPressed: () => Share.share(text),
                       ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.favorite_border,
-                          size: 20,
-                          color: Colors.white70,
-                        ),
-                        onPressed: () {
-                          // implement your "save favorite" logic here
-                          _showGlassSnackBar('Saved to favorites');
-                        },
-                      ),
-                      IconButton(
-                        icon: const Icon(
-                          Icons.delete_outline,
-                          size: 20,
-                          color: Colors.white70,
-                        ),
-                        onPressed: () {
-                          setState(() => _messages.removeAt(index));
-                          _showGlassSnackBar('Message deleted');
-                        },
-                      ),
+                      // favorite & delete removed
                     ],
                   ),
                 ],
