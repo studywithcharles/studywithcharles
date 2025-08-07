@@ -4,9 +4,54 @@ import { toB64 } from 'https://deno.land/std@0.224.0/encoding/base64.ts';
 
 // Ensure your Gemini API Key is set in your project's secrets
 const API_KEY = Deno.env.get('GEMINI_API_KEY');
-const MODEL = 'gemini-1.5-flash-latest'; // Using the latest Flash model for multimodal capabilities
+if (!API_KEY) {
+  throw new Error("GEMINI_API_KEY environment variable not set!");
+}
+
+const MODEL = 'gemini-1.5-flash-latest';
+// UPDATED: Using the stable v1 API endpoint
 const API_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}`;
+  `https://generativelanguage.googleapis.com/v1/models/${MODEL}:generateContent?key=${API_KEY}`;
+
+/**
+ * Builds a detailed system instruction prompt based on the context rules provided by the app.
+ * This is the core logic that forces the AI to behave as expected.
+ * @param {any} context_rules - The context rules object from the Flutter app.
+ * @returns {string} A detailed prompt for the AI system instruction.
+ */
+function buildSystemInstruction(context_rules: any): string {
+  let instruction = `You are an expert study assistant for a student studying "${context_rules.title || 'a given subject'}". Your primary goal is to help them understand the material. You must strictly follow all instructions.`;
+
+  switch (context_rules.result_format) {
+    case 'Summarize':
+      instruction += ` The user requires a summary. Your response MUST be a concise and easy-to-understand summary of the provided text, images, and prompt.`;
+      break;
+    case 'Generate Q&A':
+      instruction += ` The user requires questions and answers. Your response MUST be in a Q&A format. Generate relevant questions based on the provided material and then provide clear, correct answers for each.`;
+      break;
+    case 'Code for me':
+      instruction += ` The user requires code. Your response MUST include a functional code block in the appropriate language. Explain the code clearly.`;
+      break;
+    case 'Solve my assignment':
+      instruction += ` The user wants help with an assignment. Your response MUST provide a step-by-step solution. Break down the problem, show your work, and explain the reasoning behind each step.`;
+      break;
+    case 'Explain topic/Question':
+      instruction += ` The user requires a detailed explanation. Your response MUST be a comprehensive and clear explanation of the topic or question provided. Use analogies and simple terms where possible.`;
+      break;
+    default:
+      instruction += ` Respond helpfully to the user's prompt based on all provided context.`;
+      break;
+  }
+
+  if (context_rules.more_context) {
+    instruction += ` CRITICAL: You must also follow these additional user-provided rules: "${context_rules.more_context}".`;
+  }
+  
+  instruction += ` Analyze the entire chat history and all attached images to inform your response.`
+
+  return instruction;
+}
+
 
 serve(async (req) => {
   // Handle CORS preflight requests
@@ -15,37 +60,26 @@ serve(async (req) => {
   }
 
   try {
-    // 1. RECEIVE THE FULL PAYLOAD FROM THE FLUTTER APP
     const {
       prompt,
       chat_history,
       attachments,
-      context_rules
+      context_rules,
     } = await req.json();
 
-    // 2. BUILD THE SYSTEM INSTRUCTION FROM CONTEXT RULES
-    const systemInstruction = {
-      role: 'system',
-      parts: [{
-        text: `You are an expert assistant. Follow these rules precisely for your response:
-        - Your output format must be: "${context_rules.result_format}".
-        - Adhere to the following user-provided context: "${context_rules.more_context}".
-        - Analyze the content of any provided images and text from the user's attachments.
-        - The user's entire chat history is provided for context. Use it to understand the flow of the conversation.`,
-      }, ],
-    };
+    // 1. BUILD THE DYNAMIC SYSTEM INSTRUCTION FROM CONTEXT RULES
+    const systemPromptText = buildSystemInstruction(context_rules);
 
-    // 3. FORMAT THE CHAT HISTORY
+    // 2. FORMAT THE CHAT HISTORY
     // Gemini expects the role 'assistant' to be 'model'.
     const formattedHistory = chat_history.map((msg: any) => ({
       role: msg.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: msg.text }],
     }));
 
-    // 4. PREPARE THE NEW USER MESSAGE (TEXT + IMAGES)
+    // 3. PREPARE THE NEW USER MESSAGE (TEXT + IMAGES)
     const userMessageParts: any[] = [{ text: prompt }];
 
-    // Combine all image URLs (from context and session) and remove duplicates
     const allImageUrls = [
       ...(attachments.context || []),
       ...(attachments.session || []),
@@ -70,43 +104,47 @@ serve(async (req) => {
       }
     }
 
-    // 5. CONSTRUCT THE FINAL REQUEST BODY FOR GEMINI
+    // 4. CONSTRUCT THE FINAL REQUEST BODY FOR GEMINI (using v1 format)
     const requestBody = {
-      systemInstruction: systemInstruction.parts[0], // The v1beta API takes a single part object
+      // The v1 API expects systemInstruction to be an object with a parts array
+      systemInstruction: {
+        parts: [{ text: systemPromptText }],
+      },
       contents: [
         ...formattedHistory,
         { role: 'user', parts: userMessageParts },
       ],
     };
 
-    // 6. CALL THE GEMINI API
+    // 5. CALL THE GEMINI API
     const res = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody),
     });
 
-    const raw = await res.text();
-    console.log('Gemini API Response Status:', res.status);
     if (!res.ok) {
-      console.error('Gemini API Error Body:', raw);
-      throw new Error(`Gemini API Error (Status ${res.status}): ${raw}`);
+        const errorBody = await res.text();
+        console.error('Gemini API Error:', errorBody);
+        throw new Error(`API request failed with status ${res.status}: ${errorBody}`);
     }
 
-    const data = JSON.parse(raw);
-    // Add safety checks for the response structure
+    const data = await res.json();
+    
+    // Safely access the response text with optional chaining
     const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text ||
-      'Sorry, I could not generate a response.';
+      'I am sorry, but I could not generate a response. Please try again.';
 
+    // 6. RETURN THE RESPONSE TO THE FLUTTER APP
     return new Response(JSON.stringify({ response: aiText }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200,
     });
   } catch (e: any) {
-    console.error('Main function error:', e);
+    console.error('An error occurred in the Edge Function:', e);
     return new Response(JSON.stringify({ error: e.message }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
+      status: 500, // Use 500 for internal server errors
     });
   }
 });

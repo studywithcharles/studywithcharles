@@ -37,7 +37,9 @@ class _StudyListScreenState extends State<StudyListScreen>
   final TextEditingController _msgCtrl = TextEditingController();
   final ScrollController _scroll = ScrollController();
   final List<String> _attachmentUrls = [];
-  final List<String> _permanentAttachmentUrls = [];
+  final List<String> _sessionAttachmentUrls = [];
+  List<String> _permanentAttachmentUrls = [];
+  List<String> _contextRuleSessionUrls = [];
 
   final TextEditingController _titleCtl = TextEditingController();
   String _selectedFormat = 'Summarize';
@@ -90,7 +92,8 @@ class _StudyListScreenState extends State<StudyListScreen>
         _savedContexts = contexts;
         _currentContextId = null;
         _messages.clear();
-        _attachmentUrls.clear(); // FIX: Clear attachments
+        _sessionAttachmentUrls.clear(); // Clear session attachments
+        _permanentAttachmentUrls.clear(); // Clear permanent attachments
         _isLoading = false;
       });
     } catch (e) {
@@ -213,7 +216,6 @@ class _StudyListScreenState extends State<StudyListScreen>
     );
   }
 
-  /// 1) Loading a saved card: clear attachments only once
   void _openSavedCardsList() {
     showModalBottomSheet(
       context: context,
@@ -255,19 +257,45 @@ class _StudyListScreenState extends State<StudyListScreen>
                               final fullContextData = _savedContexts.firstWhere(
                                 (c) => c['id'] == id,
                               );
-                              final messages = await SupabaseService.instance
-                                  .fetchCards(id);
+
+                              final results = await Future.wait([
+                                SupabaseService.instance.fetchCards(id),
+                                SupabaseService.instance
+                                    .fetchContextAttachments(id),
+                              ]);
+
+                              // --- FIX #1: RESTORE THE CORRECT TYPE FOR MESSAGES ---
+                              final messages = results[0];
+
+                              // --- FIX #2: SAFER ATTACHMENT PROCESSING ---
+                              final rawAttachments =
+                                  results[1] as List<dynamic>;
+                              final attachments = rawAttachments
+                                  // First, filter out any items that aren't the format we want
+                                  .where(
+                                    (e) =>
+                                        e is Map<String, dynamic> &&
+                                        e['url'] is String,
+                                  )
+                                  // Then, safely map the valid items to their URL strings
+                                  .map<String>((e) => e['url'])
+                                  .toList();
+
                               if (!mounted) return;
+
                               setState(() {
                                 _currentContextId = id;
                                 _messages.clear();
-                                _attachmentUrls.clear(); // cleared here
+                                _sessionAttachmentUrls.clear();
+                                _permanentAttachmentUrls = attachments;
+
                                 _titleCtl.text = fullContextData['title'] ?? '';
                                 _selectedFormat =
                                     fullContextData['result_format'] ??
                                     'Summarize';
                                 _moreCtl.text =
                                     fullContextData['more_context'] ?? '';
+
                                 for (final m in messages) {
                                   _messages.add({
                                     'role': m['role'] ?? 'assistant',
@@ -612,244 +640,302 @@ class _StudyListScreenState extends State<StudyListScreen>
 
   /// Opens your context‐rules modal, now with image + file picking (50 MB limit),
   /// permission checks, and a preview of permanently attached images.
-  void _openContextRules() async {
+  /// 2️⃣ New helper to pick & upload from inside the context-rules sheet:
+  Future<void> _pickAndUploadContextRuleAttachment() async {
+    // request permission, pick image, etc. (same as your _pickImage + upload flow)
+    final file = await _pickImage(ImageSource.gallery);
+    if (file == null) return;
+
+    _showGlassSnackBar('Uploading attachment…');
+    try {
+      final url = await SupabaseService.instance.uploadAttachment(file);
+      setState(() {
+        _contextRuleSessionUrls.add(url);
+      });
+      _showGlassSnackBar('Attachment added to context rules!');
+    } catch (e) {
+      _showGlassSnackBar('Upload failed: $e', isError: true);
+    }
+  }
+
+  /// 3️⃣ Updated _openContextRules, replacing your old one:
+  Future<void> _openContextRules() async {
     setState(() => _rulesOpen = true);
+
+    // merge permanent + in-session for display
+    final allAttachments = [
+      ..._permanentAttachmentUrls,
+      ..._contextRuleSessionUrls,
+    ];
 
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              color: const Color.fromRGBO(255, 255, 255, 0.1),
-              padding: const EdgeInsets.all(16),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Context RULES',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                        color: Color.fromRGBO(0, 255, 255, 1),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Course Title
-                    TextField(
-                      controller: _titleCtl,
-                      decoration: const InputDecoration(
-                        labelText: 'Course Title',
-                        labelStyle: TextStyle(color: Colors.white70),
-                        hintText: 'e.g. Linear Algebra',
-                        hintStyle: TextStyle(color: Colors.white54),
-                      ),
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Result Format
-                    DropdownButtonFormField<String>(
-                      value: _selectedFormat,
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'Summarize',
-                          child: Text('Summarize'),
+      builder: (_) => StatefulBuilder(
+        builder: (BuildContext context, StateSetter setModalState) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(16),
+              ),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  color: const Color.fromRGBO(255, 255, 255, 0.1),
+                  padding: const EdgeInsets.all(16),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Context RULES',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: Color.fromRGBO(0, 255, 255, 1),
+                          ),
                         ),
-                        DropdownMenuItem(
-                          value: 'Generate Q&A',
-                          child: Text('Generate Q&A'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Code for me',
-                          child: Text('Code for me'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Solve my assignment',
-                          child: Text('Solve my assignment'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Explain topic/Question',
-                          child: Text('Explain topic/Question'),
-                        ),
-                      ],
-                      onChanged: (v) => setState(() => _selectedFormat = v!),
-                      decoration: const InputDecoration(
-                        labelText: 'Result Format',
-                        labelStyle: TextStyle(color: Colors.white70),
-                      ),
-                      dropdownColor: const Color.fromRGBO(30, 30, 30, 1),
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    const SizedBox(height: 12),
+                        const SizedBox(height: 12),
 
-                    // Add Photo/Video
-                    OutlinedButton.icon(
-                      icon: const Icon(
-                        Icons.add_a_photo,
-                        color: Colors.white70,
-                      ),
-                      label: const Text(
-                        'Add Photo/Video',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                      onPressed: () {
-                        Navigator.of(context).pop();
-                        _openCardActionsMenu();
-                      },
-                    ),
-                    const SizedBox(height: 8),
-
-                    // Attach arbitrary file
-                    OutlinedButton.icon(
-                      icon: const Icon(
-                        Icons.attach_file,
-                        color: Colors.white70,
-                      ),
-                      label: const Text(
-                        'Attach File',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                      onPressed: () {
-                        Navigator.of(context).pop();
-                        _openCardActionsMenu(); // reuse same menu for files
-                      },
-                    ),
-                    const SizedBox(height: 12),
-
-                    // 📸 Permanent attachments preview
-                    if (_attachmentUrls.isNotEmpty)
-                      SizedBox(
-                        height: 60,
-                        child: ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: _attachmentUrls.length,
-                          separatorBuilder: (_, __) => const SizedBox(width: 8),
-                          itemBuilder: (_, i) => ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.network(
-                              _attachmentUrls[i],
-                              width: 60,
-                              height: 60,
-                              fit: BoxFit.cover,
+                        // ◼️ Course Title field
+                        TextField(
+                          controller: _titleCtl,
+                          decoration: const InputDecoration(
+                            labelText: 'Course Title',
+                            labelStyle: TextStyle(color: Colors.white70),
+                            hintText: 'e.g. Linear Algebra',
+                            hintStyle: TextStyle(color: Colors.white54),
+                            enabledBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: Colors.white24),
                             ),
                           ),
+                          style: const TextStyle(color: Colors.white),
                         ),
-                      ),
-                    if (_attachmentUrls.isNotEmpty) const SizedBox(height: 16),
+                        const SizedBox(height: 16),
 
-                    // More Context
-                    TextField(
-                      controller: _moreCtl,
-                      decoration: const InputDecoration(
-                        labelText: 'More Context',
-                        labelStyle: TextStyle(color: Colors.white70),
-                        hintText: 'Any extra rules or constraints',
-                        hintStyle: TextStyle(color: Colors.white54),
-                      ),
-                      style: const TextStyle(color: Colors.white),
-                      maxLines: 3,
-                    ),
-                    const SizedBox(height: 16),
+                        // ◼️ Result Format dropdown with all five options
+                        DropdownButtonFormField<String>(
+                          value: _selectedFormat,
+                          items: const [
+                            DropdownMenuItem(
+                              value: 'Summarize',
+                              child: Text('Summarize'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Generate Q&A',
+                              child: Text('Generate Q&A'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Code for me',
+                              child: Text('Code for me'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Solve my assignment',
+                              child: Text('Solve my assignment'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'Explain topic/Question',
+                              child: Text('Explain topic/Question'),
+                            ),
+                          ],
+                          onChanged: (v) =>
+                              setModalState(() => _selectedFormat = v!),
+                          decoration: const InputDecoration(
+                            labelText: 'Result Format',
+                            labelStyle: TextStyle(color: Colors.white70),
+                            enabledBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: Colors.white24),
+                            ),
+                          ),
+                          dropdownColor: const Color.fromRGBO(30, 30, 30, 1),
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        const SizedBox(height: 16),
 
-                    // Cancel + Save Buttons
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          child: const Text(
-                            'Cancel',
+                        // ► direct upload button
+                        OutlinedButton.icon(
+                          icon: const Icon(
+                            Icons.add_a_photo,
+                            color: Colors.white70,
+                          ),
+                          label: const Text(
+                            'Add Photo/Video',
                             style: TextStyle(color: Colors.white70),
                           ),
+                          onPressed: () async {
+                            await _pickAndUploadContextRuleAttachment();
+                            setModalState(() {});
+                          },
                         ),
-                        const SizedBox(width: 16),
-                        ElevatedButton(
-                          onPressed: _titleCtl.text.trim().isEmpty
-                              ? null
-                              : () {
-                                  Navigator.of(context).pop();
-                                  _saveContextRules();
-                                },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.cyanAccent,
+                        const SizedBox(height: 12),
+
+                        // ► attachment thumbnails
+                        if (allAttachments.isNotEmpty)
+                          SizedBox(
+                            height: 72,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: allAttachments.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (_, i) {
+                                final url = allAttachments[i];
+                                return Stack(
+                                  clipBehavior: Clip.none,
+                                  children: [
+                                    ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Image.network(
+                                        url,
+                                        width: 72,
+                                        height: 72,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (c, e, st) => Container(
+                                          color: Colors.white10,
+                                          child: const Icon(
+                                            Icons.error_outline,
+                                            color: Colors.redAccent,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      top: -8,
+                                      right: -8,
+                                      child: GestureDetector(
+                                        onTap: () {
+                                          setModalState(() {
+                                            _permanentAttachmentUrls.remove(
+                                              url,
+                                            );
+                                            _contextRuleSessionUrls.remove(url);
+                                          });
+                                        },
+                                        child: const CircleAvatar(
+                                          radius: 12,
+                                          backgroundColor: Colors.black,
+                                          child: Icon(
+                                            Icons.close,
+                                            size: 16,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
                           ),
-                          child: const Text(
-                            'Save',
-                            style: TextStyle(color: Colors.black),
+                        const SizedBox(height: 16),
+
+                        // ◼️ More Context field
+                        TextField(
+                          controller: _moreCtl,
+                          decoration: const InputDecoration(
+                            labelText: 'More Context',
+                            labelStyle: TextStyle(color: Colors.white70),
+                            hintText: 'Any extra rules or constraints',
+                            hintStyle: TextStyle(color: Colors.white54),
+                            enabledBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: Colors.white24),
+                            ),
                           ),
+                          style: const TextStyle(color: Colors.white),
+                          maxLines: 3,
+                        ),
+                        const SizedBox(height: 24),
+
+                        // ◼️ Cancel / Save buttons
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(),
+                              child: const Text(
+                                'Cancel',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            ElevatedButton(
+                              onPressed: _titleCtl.text.trim().isEmpty
+                                  ? null
+                                  : () {
+                                      Navigator.of(context).pop();
+                                      _saveContextRules();
+                                    },
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.cyanAccent,
+                              ),
+                              child: const Text(
+                                'Save',
+                                style: TextStyle(color: Colors.black),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
 
     if (mounted) setState(() => _rulesOpen = false);
   }
 
+  /// 4️⃣ Finally, update your save-context call so it also links in-session attachments:
   Future<void> _saveContextRules() async {
-    // If the card already exists, we just update it.
     if (_currentContextId != null) {
-      // --- FIX IS HERE ---
-      // Changed the parameter name from 'contextId' to 'id' to match your service.
       await SupabaseService.instance.updateContext(
         id: _currentContextId!,
         title: _titleCtl.text.trim(),
         resultFormat: _selectedFormat,
         moreContext: _moreCtl.text.trim(),
       );
+      // link any NEW attachments
+      for (final url in _contextRuleSessionUrls) {
+        await SupabaseService.instance.addContextAttachment(
+          contextId: _currentContextId!,
+          url: url,
+        );
+        _permanentAttachmentUrls.add(url);
+      }
+      _contextRuleSessionUrls.clear();
+
       _showGlassSnackBar('Context updated!');
       return;
     }
 
-    // Logic for creating a new card
-    setState(() => _isLoading = true);
-    try {
-      final id = await SupabaseService.instance.createContext(
-        title: _titleCtl.text.trim().isEmpty
-            ? 'Untitled Card'
-            : _titleCtl.text.trim(),
-        resultFormat: _selectedFormat,
-        moreContext: _moreCtl.text.trim().isEmpty ? null : _moreCtl.text.trim(),
+    // … your existing “create new context” logic …
+    final newId = await SupabaseService.instance.createContext(
+      title: _titleCtl.text.trim().isEmpty
+          ? 'Untitled Card'
+          : _titleCtl.text.trim(),
+      resultFormat: _selectedFormat,
+      moreContext: _moreCtl.text.trim(),
+    );
+    // link attachments
+    for (final url in _contextRuleSessionUrls) {
+      await SupabaseService.instance.addContextAttachment(
+        contextId: newId,
+        url: url,
       );
-
-      // Link any temporary attachments that were added *before* this first save
-      for (final url in _attachmentUrls) {
-        await SupabaseService.instance.addContextAttachment(
-          contextId: id,
-          url: url,
-        );
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _currentContextId = id;
-        // Move temporary attachments to permanent ones for display in the popup
-        _permanentAttachmentUrls.addAll(_attachmentUrls);
-        _attachmentUrls.clear();
-      });
-
-      _showGlassSnackBar('Context saved! You can now ask questions.');
-    } catch (e) {
-      _showGlassSnackBar('Error saving context: $e', isError: true);
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
+      _permanentAttachmentUrls.add(url);
     }
+    _contextRuleSessionUrls.clear();
+
+    setState(() => _currentContextId = newId);
+    _showGlassSnackBar('Context saved! You can now ask questions.');
   }
 
   /// Smoothly scrolls your ListView to the bottom after new messages.
@@ -867,19 +953,16 @@ class _StudyListScreenState extends State<StudyListScreen>
 
   Future<void> _sendMessageHandler(String text) async {
     final promptText = text.trim();
-    // Nothing to do if they didn't type and didn't attach
-    if (promptText.isEmpty && _attachmentUrls.isEmpty) return;
+    if (promptText.isEmpty && _sessionAttachmentUrls.isEmpty) return;
 
-    // Make sure the user has saved their Context RULES
     if (_currentContextId == null) {
       _openContextRules();
       return;
     }
 
-    // Copy out the attachments they've just queued up
-    final attachmentsForThisMessage = List<String>.from(_attachmentUrls);
+    // Use the new session attachments list
+    final attachmentsForThisMessage = List<String>.from(_sessionAttachmentUrls);
 
-    // Optimistically update the UI with user message(s) + typing indicator
     setState(() {
       if (promptText.isNotEmpty) {
         _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
@@ -887,26 +970,21 @@ class _StudyListScreenState extends State<StudyListScreen>
       for (final url in attachmentsForThisMessage) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
       }
-      // Our temporary “typing” indicator
       _messages.add({'role': 'assistant', 'text': '', 'type': 'typing'});
 
       _msgCtrl.clear();
-      _attachmentUrls.clear();
+      _sessionAttachmentUrls.clear(); // Clear session list after sending
     });
     _scrollToBottom();
 
     try {
-      // 1️⃣ Load any attachments permanently saved to this card
-      final permanentAttachments = await SupabaseService.instance
-          .fetchContextAttachments(_currentContextId!);
-
-      // 2️⃣ Build a rich payload for your edge function
+      // The permanent attachments are already in state, no need to fetch again
       final payload = {
         'prompt': promptText,
         'chat_history': _messages.sublist(0, _messages.length - 1),
         'attachments': {
-          'session': attachmentsForThisMessage, // new files just sent
-          'context': permanentAttachments, // files saved on card
+          'session': attachmentsForThisMessage,
+          'context': _permanentAttachmentUrls, // Use the state variable
         },
         'context_rules': {
           'title': _titleCtl.text.trim(),
@@ -915,7 +993,6 @@ class _StudyListScreenState extends State<StudyListScreen>
         },
       };
 
-      // 3️⃣ Call the right function (text or image)
       final functionName = _displaySection == 1 ? 'image-proxy' : 'text-proxy';
       final response = await Supabase.instance.client.functions.invoke(
         functionName,
@@ -933,21 +1010,18 @@ class _StudyListScreenState extends State<StudyListScreen>
 
       if (!mounted) return;
 
-      // 4️⃣ Replace typing indicator with the real reply
       setState(() {
         _messages.removeLast();
         _messages.add({'role': 'assistant', 'text': aiText, 'type': aiType});
       });
       _scrollToBottom();
 
-      // 5️⃣ Persist the full, updated conversation
       await SupabaseService.instance.saveCard(
         contextId: _currentContextId!,
         content: {'messages': _messages},
       );
     } catch (e) {
       if (!mounted) return;
-      // Remove typing indicator and show error
       setState(() => _messages.removeLast());
       _showGlassSnackBar(e.toString(), isError: true);
     }
