@@ -53,6 +53,37 @@ class SupabaseService {
     await supabase.from('users').update(updates).eq('id', user.uid);
   }
 
+  /// Updates the social media handles for the current user.
+  Future<void> updateUserSocials({
+    String? tiktok,
+    String? instagram,
+    String? x,
+  }) async {
+    final user = supabase.auth.currentUser;
+    if (user == null) throw Exception('Not signed in');
+
+    // First, fetch the existing social handles
+    final existingData = await supabase
+        .from('users')
+        .select('social_handles')
+        .eq('id', user.id)
+        .single();
+
+    final handles =
+        (existingData['social_handles'] as Map<String, dynamic>?) ?? {};
+
+    // Update the values if they were provided
+    if (tiktok != null) handles['tiktok'] = tiktok;
+    if (instagram != null) handles['instagram'] = instagram;
+    if (x != null) handles['x'] = x;
+
+    // Write the updated map back to the database
+    await supabase
+        .from('users')
+        .update({'social_handles': handles})
+        .eq('id', user.id);
+  }
+
   // ===========================================================================
   // == CONTEXTS (For Study Section)
   // ===========================================================================
@@ -305,18 +336,33 @@ class SupabaseService {
     await supabase.from('events').delete().eq('id', eventId);
   }
 
-  // THIS IS THE CORRECTED METHOD TO FIX EVENTS NOT SHOWING
+  /// Fetch timetable events for the currently-signed-in Firebase user.
+  /// Uses the DB RPC that accepts a p_user_id text parameter so we don't
+  /// depend on auth.uid() inside Postgres (which caused the `uuid`/`text`
+  /// errors you saw).
   Future<List<Map<String, dynamic>>> fetchEvents() async {
-    final user = fb_auth.FirebaseAuth.instance.currentUser;
-    if (user == null) return [];
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) {
+      // Not signed in — return empty list (caller already handles UI while loading).
+      return <Map<String, dynamic>>[];
+    }
 
-    // This calls the simpler, more reliable function from your schema
-    final rows = await supabase.rpc(
-      'get_events_with_groups',
-      params: {'p_user_id': user.uid},
-    );
+    final uid = firebaseUser.uid;
+    try {
+      // Call the version of the RPC that accepts p_user_id text
+      final rows = await supabase.rpc(
+        'get_timetable_events_for_user',
+        params: {'p_user_id': uid},
+      );
 
-    return List<Map<String, dynamic>>.from(rows as List);
+      if (rows == null) return <Map<String, dynamic>>[];
+      return List<Map<String, dynamic>>.from(rows as List);
+    } catch (e) {
+      // Re-throw or wrap as needed. Returning empty list isn't ideal here because
+      // the UI expects errors, so rethrow as PostgrestException style.
+      rethrow;
+    }
   }
 
   // ===========================================================================
@@ -369,14 +415,87 @@ class SupabaseService {
   // ===========================================================================
   // == TIMETABLE (SUBSCRIPTIONS)
   // ===========================================================================
-  Future<void> subscribeToTimetable(String timetableCode) async {
-    if (timetableCode.isEmpty) {
-      throw Exception('Timetable code cannot be empty.');
+  /// Subscribe to another user's timetable by their username.
+  /// Calls the DB RPC `subscribe_to_timetable_by_username(p_username text)`.
+  Future<void> subscribeToTimetable(String username) async {
+    final name = username.trim();
+    if (name.isEmpty) {
+      throw Exception('Username cannot be empty.');
     }
+
+    // Call the RPC we created in the DB that looks up the target user by username
+    // and inserts a row into timetable_shares.
     await supabase.rpc(
-      'subscribe_to_timetable',
-      params: {'p_timetable_code': timetableCode},
+      'subscribe_to_timetable_by_username',
+      params: {'p_username': name},
     );
+  }
+
+  /// Returns the list of users that the current user has added (subscribed to).
+  /// Implemented client-side so we pass the Firebase uid directly instead of
+  /// relying on auth.uid() in Postgres.
+  Future<List<Map<String, dynamic>>> getMySharedUsers() async {
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) return <Map<String, dynamic>>[];
+
+    final uid = firebaseUser.uid;
+
+    // We'll select from timetable_shares and join the users table to return
+    // the chopped-down user info the UI needs.
+    final rows = await supabase
+        .from('timetable_shares')
+        .select(
+          'shared_user_id, created_at, shared_user:users(id, display_name, username, avatar_url)',
+        )
+        .eq('owner_id', uid)
+        .order('created_at', ascending: false);
+
+    if (rows == null) return <Map<String, dynamic>>[];
+
+    // Convert to consistent List<Map<String,dynamic>> format expected by UI
+    final list = (rows as List).map((r) {
+      final map = Map<String, dynamic>.from(r as Map);
+      // the joined user columns will be under 'shared_user'
+      final joined = map['shared_user'] as Map<String, dynamic>? ?? {};
+      return {
+        'id': joined['id'] ?? map['shared_user_id'],
+        'display_name': joined['display_name'],
+        'username': joined['username'],
+        'avatar_url': joined['avatar_url'],
+        'created_at': map['created_at'],
+      };
+    }).toList();
+
+    return List<Map<String, dynamic>>.from(list);
+  }
+
+  Future<void> unsubscribeFromTimetable(String sharedUserId) async {
+    final id = sharedUserId.trim();
+    if (id.isEmpty) return;
+    await supabase.rpc(
+      'unsubscribe_from_timetable',
+      params: {'p_shared_user_id': id},
+    );
+  }
+
+  /// Fetch addon stats for a username. Expects RPC `get_timetable_addon_stats(p_username text)`
+  /// to return a single row like { total: int, plus: int }.
+  Future<Map<String, int>> fetchTimetableAddonStats(String username) async {
+    final name = username.trim();
+    if (name.isEmpty) return {'total': 0, 'plus': 0};
+
+    final res = await supabase.rpc(
+      'get_timetable_addon_stats',
+      params: {'p_username': name},
+    );
+    if (res == null) return {'total': 0, 'plus': 0};
+
+    final map = Map<String, dynamic>.from((res as List).first as Map);
+    return {
+      'total': (map['total'] as int?) ?? 0,
+      'plus': (map['plus'] as int?) ?? 0,
+    };
   }
 
   // ===========================================================================

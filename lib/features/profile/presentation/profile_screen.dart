@@ -24,6 +24,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String _bio = '';
   String _usdtWallet = '';
   String? _photoUrl;
+  String _tiktokUrl = '';
+  String _instagramUrl = '';
+  String _xUrl = '';
 
   @override
   void initState() {
@@ -35,7 +38,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final user = AuthService.instance.currentUser;
     if (user == null) return;
 
+    // NOTE: Switched from user.uid to user.id for Supabase Auth
     final profile = await SupabaseService.instance.fetchUserProfile(user.uid);
+    if (!mounted) return;
+
     setState(() {
       _name = profile['display_name'] as String? ?? '';
       _username = profile['username'] as String? ?? '';
@@ -43,6 +49,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
       _bio = profile['bio'] as String? ?? '';
       _usdtWallet = profile['wallet_address'] as String? ?? '';
       _photoUrl = profile['avatar_url'] as String?;
+
+      // --- NEW: Safely load social media links from the JSONB column ---
+      final socialHandles = profile['social_handles'] as Map<String, dynamic>?;
+      if (socialHandles != null) {
+        _tiktokUrl = socialHandles['tiktok'] as String? ?? '';
+        _instagramUrl = socialHandles['instagram'] as String? ?? '';
+        _xUrl = socialHandles['x'] as String? ?? '';
+      }
+
       _isLoading = false;
     });
   }
@@ -107,13 +122,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
-      // no appBar
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
-              // Profile photo
               GestureDetector(
                 onTap: _pickProfilePhoto,
                 child: ClipOval(
@@ -140,9 +153,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   style: TextStyle(color: Colors.cyanAccent),
                 ),
               ),
-
               const SizedBox(height: 16),
-              // Username and email
               Text(
                 '@$_username',
                 style: const TextStyle(
@@ -153,9 +164,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
               const SizedBox(height: 4),
               Text(_email, style: const TextStyle(color: Colors.white70)),
-
               const SizedBox(height: 24),
-              // Editable info tiles
               _buildInfoTile(
                 icon: Icons.person,
                 label: 'Name',
@@ -181,8 +190,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   initialValue: _username,
                   validator: (v) {
                     final re = RegExp(r'^[a-zA-Z0-9_]{3,15}$');
-                    if (v == null || !re.hasMatch(v))
+                    if (v == null || !re.hasMatch(v)) {
                       return '3–15 chars: letters, numbers, underscore';
+                    }
                     return null;
                   },
                   onSaved: (val) async {
@@ -208,6 +218,59 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
               const SizedBox(height: 12),
+
+              // --- NEW SOCIAL MEDIA TILES ---
+              _buildInfoTile(
+                icon: Icons.music_note,
+                label: 'TikTok URL',
+                value: _tiktokUrl,
+                onEdit: () => _editField(
+                  label: 'TikTok URL',
+                  initialValue: _tiktokUrl,
+                  keyboardType: TextInputType.url,
+                  onSaved: (val) async {
+                    await SupabaseService.instance.updateUserSocials(
+                      tiktok: val,
+                    );
+                    setState(() => _tiktokUrl = val);
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+              _buildInfoTile(
+                icon: Icons.camera_alt,
+                label: 'Instagram URL',
+                value: _instagramUrl,
+                onEdit: () => _editField(
+                  label: 'Instagram URL',
+                  initialValue: _instagramUrl,
+                  keyboardType: TextInputType.url,
+                  onSaved: (val) async {
+                    await SupabaseService.instance.updateUserSocials(
+                      instagram: val,
+                    );
+                    setState(() => _instagramUrl = val);
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+              _buildInfoTile(
+                icon: Icons.close,
+                label: 'X (Twitter) URL',
+                value: _xUrl,
+                onEdit: () => _editField(
+                  label: 'X (Twitter) URL',
+                  initialValue: _xUrl,
+                  keyboardType: TextInputType.url,
+                  onSaved: (val) async {
+                    await SupabaseService.instance.updateUserSocials(x: val);
+                    setState(() => _xUrl = val);
+                  },
+                ),
+              ),
+
+              // --- END OF NEW TILES ---
+              const SizedBox(height: 12),
               _buildInfoTile(
                 icon: Icons.account_balance_wallet,
                 label: 'USDT Wallet',
@@ -215,9 +278,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 onEdit: () => _editField(
                   label: 'USDT Wallet',
                   initialValue: _usdtWallet,
-                  validator: (v) => v != null && v.startsWith('0x')
+                  validator: (v) =>
+                      v != null && v.isNotEmpty && v.startsWith('0x')
                       ? null
-                      : 'Must start with 0x',
+                      : 'Must be a valid wallet address',
                   onSaved: (val) async {
                     await SupabaseService.instance.updateUserProfile(
                       usdtWallet: val,
@@ -237,7 +301,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
                 onPressed: () async {
                   await AuthService.instance.signOut();
-                  Navigator.pop(context);
+                  if (mounted) {
+                    Navigator.of(context).popUntil((route) => route.isFirst);
+                  }
                 },
                 child: const Text(
                   'Sign Out',

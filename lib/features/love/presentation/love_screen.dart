@@ -14,78 +14,147 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
   bool _isLoading = true;
   bool _showWriteUp = false;
   bool _isPremium = false;
+  final PageController _pageController = PageController();
+  int _currentPage = 0;
+  int? _selectedNomineeIndex;
 
   // State variables to hold live data from Supabase
   Map<String, dynamic>? _activeCycle;
   List<Map<String, dynamic>> _pastWinners = [];
   List<Map<String, dynamic>> _nominees = [];
+  final List<String> _pageTitles = [
+    'Election',
+    'Achievements',
+    'Elders’ Suggestions',
+  ];
   // We will add elder proposals later
 
   @override
   void initState() {
     super.initState();
-    _checkPremiumStatus();
-    _fetchLoveSectionData();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkPremiumStatus();
+      _fetchLoveSectionData();
+    });
+
+    _pageController.addListener(() {
+      final page = (_pageController.page ?? 0).round();
+      if (page != _currentPage) {
+        setState(() => _currentPage = page);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
   }
 
   // We will replace this with a real check from your database later.
-  void _checkPremiumStatus() {
-    final user = AuthService.instance.currentUser;
-    setState(() {
-      _isPremium = user != null && user.email!.endsWith('@premium.com');
-    });
+  Future<void> _checkPremiumStatus() async {
+    final uid = AuthService.instance.currentUser?.uid;
+    if (uid == null || !mounted) return;
+
+    try {
+      final profile = await SupabaseService.instance.fetchUserProfile(uid);
+      if (mounted) {
+        setState(() {
+          _isPremium = profile['is_premium'] as bool? ?? false;
+        });
+      }
+    } catch (e) {
+      // fail quietly but log and keep UI responsive
+      if (mounted) {
+        setState(() => _isPremium = false);
+        // optional: surface a small non-blocking hint
+        // ScaffoldMessenger.of(context).showSnackBar(...);
+      }
+    }
   }
 
   Future<void> _fetchLoveSectionData() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
-    try {
-      _pastWinners = await SupabaseService.instance.fetchPastTcaWinners();
-      _activeCycle = await SupabaseService.instance.fetchActiveTcaCycle();
 
-      if (_activeCycle != null) {
-        _nominees = await SupabaseService.instance.fetchTcaNominees(
-          _activeCycle!['id'],
+    try {
+      final past = await SupabaseService.instance.fetchPastTcaWinners();
+      final active = await SupabaseService.instance.fetchActiveTcaCycle();
+
+      List<Map<String, dynamic>> nominees = [];
+      if (active != null && active['id'] != null) {
+        nominees = await SupabaseService.instance.fetchTcaNominees(
+          active['id'],
         );
       }
+
+      if (!mounted) return;
+      setState(() {
+        _pastWinners = past;
+        _activeCycle = active;
+        _nominees = nominees;
+      });
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error fetching TCA data: ${e.toString()}'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error fetching TCA data: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (!mounted) return;
+      setState(() => _isLoading = false);
     }
   }
 
   Future<void> _handleVote(String nomineeUsername) async {
+    // Guard: premium only
     if (!_isPremium) {
+      // Show upgrade CTA with action
+      final upgrade = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Premium required'),
+          content: const Text(
+            'Voting is a premium feature. Upgrade to participate.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Maybe later'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Upgrade'),
+            ),
+          ],
+        ),
+      );
+
+      if (upgrade == true) {
+        _openUpgrade();
+      }
+      return;
+    }
+
+    if (_activeCycle == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Voting is a premium feature.'),
+          content: Text('No active voting cycle.'),
           backgroundColor: Colors.amber,
         ),
       );
       return;
     }
 
-    if (_activeCycle == null) return;
-
-    // Guard the context before the async gap
-    if (!mounted) return;
-
+    // Confirm vote
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Confirm Your Vote'),
         content: Text(
-          'Are you sure you want to vote for $nomineeUsername? This cannot be undone.',
+          'Are you sure you want to vote for $nomineeUsername? This action cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -100,36 +169,47 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
       ),
     );
 
-    // Guard the context after the async gap
+    if (confirm != true) return;
     if (!mounted) return;
 
-    if (confirm == true) {
-      try {
-        await SupabaseService.instance.castTcaVote(
-          _activeCycle!['id'],
-          nomineeUsername,
-        );
+    try {
+      await SupabaseService.instance.castTcaVote(
+        _activeCycle!['id'],
+        nomineeUsername,
+      );
 
-        // Guard the context again after the final await
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Successfully voted for $nomineeUsername!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Error casting vote: You may have already voted in this cycle.',
-            ),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Successfully voted for $nomineeUsername!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      // refresh the data so vote counts update
+      await _fetchLoveSectionData();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error casting vote: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
+  }
+
+  void _openUpgrade() {
+    // Placeholder upgrade flow.
+    // Replace with your real navigation to purchase / subscription page.
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const Text('Upgrade to Premium')),
+          body: const Center(child: Text('Upgrade flow goes here')),
+        ),
+      ),
+    );
   }
 
   @override
@@ -138,103 +218,223 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        backgroundColor: Colors.black,
+        backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            'Love Section',
-            style: TextStyle(
-              fontFamily: 'Roboto',
-              fontWeight: FontWeight.w900,
-              fontSize: 22,
-              color: Colors.white,
+        title: Row(
+          children: [
+            Expanded(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                child: Text(
+                  _pageTitles[_currentPage],
+                  key: ValueKey(_currentPage),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 22,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
             ),
-          ),
+            Row(
+              children: List.generate(
+                _pageTitles.length,
+                (i) => Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  width: _currentPage == i ? 10 : 6,
+                  height: _currentPage == i ? 10 : 6,
+                  decoration: BoxDecoration(
+                    color: _currentPage == i
+                        ? Colors.cyanAccent
+                        : Colors.white24,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(Icons.info_outline, color: Colors.white),
+              onPressed: () => setState(() => _showWriteUp = !_showWriteUp),
+            ),
+          ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.info_outline, color: Colors.white),
-            onPressed: () => setState(() => _showWriteUp = !_showWriteUp),
-          ),
-        ],
       ),
-      body: Stack(
-        children: [
-          _isLoading
-              ? const Center(
-                  child: CircularProgressIndicator(color: Colors.cyanAccent),
-                )
-              : DefaultTabController(
-                  length: 3,
-                  child: Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(16),
-                          child: BackdropFilter(
-                            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                            child: Container(
-                              color: Colors.white10,
-                              padding: const EdgeInsets.all(16),
-                              child: const Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'The Charles Award',
-                                    style: TextStyle(
-                                      color: Colors.cyanAccent,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  SizedBox(height: 8),
-                                  Text(
-                                    'Participate by nominating, voting, and celebrating our community heroes.',
-                                    style: TextStyle(color: Colors.white70),
-                                  ),
-                                ],
+      body: SafeArea(
+        child: Stack(
+          children: [
+            if (_isLoading)
+              const Center(
+                child: CircularProgressIndicator(color: Colors.cyanAccent),
+              )
+            else
+              Column(
+                children: [
+                  // header (NO premium chip)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16.0,
+                      vertical: 12,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(14),
+                          decoration: const BoxDecoration(
+                            color: Colors.white10,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              Text(
+                                'The Charles Award',
+                                style: TextStyle(
+                                  color: Colors.cyanAccent,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
-                            ),
+                              SizedBox(height: 6),
+                              Text(
+                                'Nominate, vote and celebrate community heroes.',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                      const TabBar(
-                        labelColor: Colors.cyanAccent,
-                        unselectedLabelColor: Colors.white70,
-                        indicatorColor: Colors.cyanAccent,
-                        tabs: [
-                          Tab(text: 'Election'),
-                          Tab(text: 'Achievements'),
-                          Tab(text: 'Elders’ Suggestions'),
-                        ],
-                      ),
-                      Expanded(
-                        child: TabBarView(
-                          children: [
-                            _buildElectionTab(),
-                            const Center(
-                              child: Text(
-                                'Achievements coming soon.',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                            ),
-                            const Center(
-                              child: Text(
-                                'Elders’ Suggestions coming soon.',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                            ),
-                          ],
+                    ),
+                  ),
+
+                  // PageView (swipe to change pages)
+                  Expanded(
+                    child: PageView(
+                      controller: _pageController,
+                      children: [
+                        _buildElectionTab(),
+                        const Center(
+                          child: Text(
+                            'Achievements coming soon.',
+                            style: TextStyle(color: Colors.white70),
+                          ),
                         ),
+                        const Center(
+                          child: Text(
+                            'Elders’ Suggestions coming soon.',
+                            style: TextStyle(color: Colors.white70),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+
+            if (_showWriteUp) _buildWriteUpOverlay(),
+          ],
+        ),
+      ),
+
+      // Bottom big vote button — visible only on Election page (page 0)
+      bottomNavigationBar: _currentPage == 0
+          ? SafeArea(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                color: Colors.black,
+                child: SizedBox(
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      // if not premium, show upgrade CTA (same idea as earlier)
+                      if (!_isPremium) {
+                        final upgrade = await showDialog<bool>(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('Premium required'),
+                            content: const Text(
+                              'Voting is a premium feature. Upgrade to participate.',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(context).pop(false),
+                                child: const Text('Maybe later'),
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(context).pop(true),
+                                child: const Text('Upgrade'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (upgrade == true) _openUpgrade();
+                        return;
+                      }
+
+                      // If voting period is closed, do nothing (button shows closed)
+                      if (!_isVotingPeriodActive()) return;
+
+                      // If a nominee is already selected, vote for it directly
+                      if (_selectedNomineeIndex != null &&
+                          _nominees.isNotEmpty) {
+                        final username =
+                            _nominees[_selectedNomineeIndex!]['username']
+                                ?.toString() ??
+                            '';
+                        if (username.isNotEmpty) {
+                          await _handleVote(username);
+                        }
+                        return;
+                      }
+
+                      // No selection: show nominee picker dialog (simple list)
+                      final picked = await _showNomineePicker();
+                      if (picked != null) {
+                        await _handleVote(picked);
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: (_isPremium && _isVotingPeriodActive())
+                          ? Colors.redAccent
+                          : Colors.redAccent.withOpacity(0.28),
+                      foregroundColor: Colors.white,
+                      textStyle: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
                       ),
-                    ],
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        if (!_isPremium) const Icon(Icons.lock, size: 20),
+                        if (!_isPremium) const SizedBox(width: 8),
+                        Text(
+                          !_isVotingPeriodActive()
+                              ? 'Voting closed'
+                              : (_selectedNomineeIndex == null
+                                    ? 'Select a nominee'
+                                    : 'VOTE — ${_nominees[_selectedNomineeIndex!]['username'] ?? ''}'),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-          if (_showWriteUp) _buildWriteUpOverlay(),
-        ],
-      ),
+              ),
+            )
+          : const SizedBox.shrink(),
     );
   }
 
@@ -244,10 +444,11 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
       color: Colors.cyanAccent,
       backgroundColor: Colors.black,
       child: ListView(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(16),
         children: [
+          // Past winners
           const Text(
-            'Past Winners:',
+            'Past Winners',
             style: TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.bold,
@@ -262,102 +463,230 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
             )
           else
             ..._pastWinners.map(
-              (w) => Text(
-                '${w['cycle_id'] ?? 'Previous Cycle'}: ${w['winner_username']} (Prize: ${w['prize_amount']})',
-                style: const TextStyle(color: Colors.white70),
+              (w) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6.0),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: Colors.white10,
+                      child: Text(
+                        (w['winner_username'] ?? '?').toString().isNotEmpty
+                            ? (w['winner_username'][0] as String).toUpperCase()
+                            : '?',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        '${w['cycle_id'] ?? 'Cycle'} — ${w['winner_username']} (Prize: ${w['prize_amount'] ?? '—'})',
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          const Divider(color: Colors.white24, height: 32),
+
+          const SizedBox(height: 18),
+          const Divider(color: Colors.white24, height: 12),
+          const SizedBox(height: 8),
+
+          // Current nominees header
           const Text(
-            'Current Nominees:',
+            'Current Nominees',
             style: TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.bold,
               fontSize: 16,
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 12),
+
           if (_nominees.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 16.0),
-              child: Center(
-                child: Text(
-                  'No active voting cycle at the moment.',
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
-                ),
+            Center(
+              child: Column(
+                children: const [
+                  SizedBox(height: 20),
+                  Icon(
+                    Icons.how_to_vote_outlined,
+                    size: 48,
+                    color: Colors.white24,
+                  ),
+                  SizedBox(height: 10),
+                  Text(
+                    'No active voting cycle at the moment.',
+                    style: TextStyle(color: Colors.white70, fontSize: 15),
+                  ),
+                ],
               ),
             )
           else
-            ..._nominees.map(
-              (n) => Card(
-                color: Colors.white10,
-                child: ListTile(
-                  title: Text(
-                    n['username'],
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
+            ...List.generate(_nominees.length, (index) {
+              final n = _nominees[index];
+              final username = n['username']?.toString() ?? 'Unknown';
+              final bio = n['bio']?.toString();
+              final votes = n['votes'] ?? 0;
+              final selected = _selectedNomineeIndex == index;
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8.0),
+                child: GestureDetector(
+                  onTap: () => setState(() => _selectedNomineeIndex = index),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(12),
+                      border: selected
+                          ? Border.all(color: Colors.cyanAccent, width: 2)
+                          : null,
                     ),
-                  ),
-                  trailing: ElevatedButton(
-                    onPressed: () => _handleVote(n['username']),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isPremium
-                          ? Colors.cyanAccent
-                          : Colors.grey[700],
-                      foregroundColor: Colors.black,
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      leading: CircleAvatar(
+                        radius: 26,
+                        backgroundColor: Colors.white12,
+                        child: Text(
+                          username.isNotEmpty ? username[0].toUpperCase() : '?',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      title: Text(
+                        username,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: bio != null
+                          ? Text(
+                              bio,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            )
+                          : null,
+                      trailing: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white12,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.favorite,
+                              size: 14,
+                              color: Colors.cyanAccent,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              votes.toString(),
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                    child: Text(_isPremium ? 'Vote' : 'Premium'),
                   ),
                 ),
-              ),
-            ),
+              );
+            }).toList(),
         ],
       ),
     );
+  }
+
+  Future<String?> _showNomineePicker() async {
+    if (_nominees.isEmpty) return null;
+    return showDialog<String?>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Choose nominee to vote for'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: _nominees.length,
+              itemBuilder: (context, i) {
+                final name = _nominees[i]['username']?.toString() ?? 'Unknown';
+                return ListTile(
+                  title: Text(name),
+                  onTap: () => Navigator.of(context).pop(name),
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  bool _isVotingPeriodActive() {
+    if (_activeCycle == null) return false;
+    final flag = _activeCycle!['is_voting'] ?? _activeCycle!['voting_active'];
+    if (flag is bool) return flag;
+    // fallback: assume activeCycle means voting allowed
+    return true;
   }
 
   Widget _buildWriteUpOverlay() {
     return GestureDetector(
       onTap: () => setState(() => _showWriteUp = false),
       child: Container(
-        // FIXED: Replaced deprecated 'withOpacity'
         color: Colors.black54,
-        child: Center(
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-              child: Container(
-                width: MediaQuery.of(context).size.width * 0.85,
-                padding: const EdgeInsets.all(24),
-                color: Colors.white10,
-                child: const SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'About The Charles Award',
-                        style: TextStyle(
-                          color: Colors.cyanAccent,
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      SizedBox(height: 12),
-                      Text(
-                        'The Charles Award is our founder’s philanthropic initiative, selected by community vote each year to fund one worthy project. Nominate, vote, and celebrate our winners—let’s give back to the Charles community together!',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.white70, height: 1.5),
-                      ),
-                      SizedBox(height: 24),
-                      Text(
-                        'Tap anywhere to close',
-                        style: TextStyle(color: Colors.white38, fontSize: 12),
-                      ),
-                    ],
+        alignment: Alignment.center,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            child: Container(
+              width: MediaQuery.of(context).size.width * 0.86,
+              padding: const EdgeInsets.all(20),
+              color: Colors.white10,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Text(
+                    'About The Charles Award',
+                    style: TextStyle(
+                      color: Colors.cyanAccent,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                ),
+                  SizedBox(height: 12),
+                  Text(
+                    'The Charles Award is our founder’s philanthropic initiative, selected by community vote each year to fund one worthy project. Nominate, vote, and celebrate our winners—let’s give back to the Charles community together!',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white70, height: 1.5),
+                  ),
+                  SizedBox(height: 18),
+                  Text(
+                    'Tap anywhere to close',
+                    style: TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ],
               ),
             ),
           ),
