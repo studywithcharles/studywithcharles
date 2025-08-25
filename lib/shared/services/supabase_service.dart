@@ -451,6 +451,7 @@ class SupabaseService {
         .eq('owner_id', uid)
         .order('created_at', ascending: false);
 
+    // ignore: unnecessary_null_comparison
     if (rows == null) return <Map<String, dynamic>>[];
 
     // Convert to consistent List<Map<String,dynamic>> format expected by UI
