@@ -44,6 +44,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  flutter_launcher_icons: "^0.13.1"
 
   # Recommended lints
   flutter_lints: ^6.0.0
@@ -53,3 +54,14 @@ flutter:
 
   assets:
     - .env
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  
+  # For iOS and older Android, we can use your main background image
+  image_path: "assets/icon/background.png" 
+  
+  # For modern Android's adaptive icon
+  adaptive_icon_background: "assets/icon/background.png" # Your space image
+  adaptive_icon_foreground: "assets/icon/foreground.png" # Your NEW logo image

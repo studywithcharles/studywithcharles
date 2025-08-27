@@ -222,20 +222,22 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
         elevation: 0,
         title: Row(
           children: [
-            Expanded(
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 250),
-                child: Text(
-                  _pageTitles[_currentPage],
-                  key: ValueKey(_currentPage),
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w900,
-                    fontSize: 22,
-                    color: Colors.white,
-                  ),
+            // 1. Title text without Expanded
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: Text(
+                _pageTitles[_currentPage],
+                key: ValueKey(_currentPage),
+                style: const TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 22,
+                  color: Colors.white,
                 ),
               ),
             ),
+            // 2. Add a Spacer to push everything else to the right
+            const Spacer(),
+            // 3. The rest of the widgets remain the same
             Row(
               children: List.generate(
                 _pageTitles.length,
@@ -286,26 +288,28 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
                           decoration: const BoxDecoration(
                             color: Colors.white10,
                           ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: const [
-                              Text(
-                                'The Charles Award',
-                                style: TextStyle(
-                                  color: Colors.cyanAccent,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
+                          child: RichText(
+                            text: TextSpan(
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 14,
+                                height: 1.5,
                               ),
-                              SizedBox(height: 6),
-                              Text(
-                                'Nominate, vote and celebrate community heroes.',
-                                style: TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 13,
+                              children: <TextSpan>[
+                                const TextSpan(
+                                  text: 'The Charles Award (TCA) ',
+                                  style: TextStyle(
+                                    color: Colors.cyanAccent,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
-                              ),
-                            ],
+                                const TextSpan(
+                                  text:
+                                      'is an initiative from the founder that allows anyone using the SWC app to cash out. It\'s that simple. So show some love by participating in The Charles Award Challenges. Check the "i" button in the top right corner for details on how to participate',
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                       ),
@@ -651,6 +655,28 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
   }
 
   Widget _buildWriteUpOverlay() {
+    // Helper widget for consistent rule point styling
+    Widget buildRulePoint(String text) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6.0),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 4.0, right: 8.0),
+              child: Icon(Icons.circle, size: 6, color: Colors.cyanAccent),
+            ),
+            Expanded(
+              child: Text(
+                text,
+                style: const TextStyle(color: Colors.white70, height: 1.5),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return GestureDetector(
       onTap: () => setState(() => _showWriteUp = false),
       child: Container(
@@ -661,32 +687,67 @@ class _LoveSectionScreenState extends State<LoveSectionScreen> {
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
             child: Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.8,
+              ),
               width: MediaQuery.of(context).size.width * 0.86,
               padding: const EdgeInsets.all(20),
               color: Colors.white10,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: const [
-                  Text(
-                    'About The Charles Award',
-                    style: TextStyle(
-                      color: Colors.cyanAccent,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'The Charles Award',
+                      style: TextStyle(
+                        color: Colors.cyanAccent,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 12),
-                  Text(
-                    'The Charles Award is our founder’s philanthropic initiative, selected by community vote each year to fund one worthy project. Nominate, vote, and celebrate our winners—let’s give back to the Charles community together!',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white70, height: 1.5),
-                  ),
-                  SizedBox(height: 18),
-                  Text(
-                    'Tap anywhere to close',
-                    style: TextStyle(color: Colors.white38, fontSize: 12),
-                  ),
-                ],
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Current total prize pool: _____________',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const Divider(color: Colors.white24, height: 24),
+                    buildRulePoint(
+                      'Once a month, a TCA post will be uploaded on all our social media official handles @theswcapp with the caption "#tca".',
+                    ),
+                    buildRulePoint(
+                      'All users (free and plus) can participate by commenting their username in the comment section of that post. You can comment your username or another user\'s username as much as you want.',
+                    ),
+                    buildRulePoint(
+                      'After a week, the "swcaiagent" scrapes all usernames from the comments of the TCA posts and collates the results to nominate users. The most commented username will always be amongst the list of nominees together with other usernames randomly selected by the "swcaiagent".',
+                    ),
+                    buildRulePoint(
+                      'Plus users are five (5) times more likely to get nominated than free users and the number of nominees and winners grows as the plus user number grows.',
+                    ),
+                    buildRulePoint(
+                      'The nominees are given a Charles Award Challenge (CAC) to perform on their social media accounts and whiles they do the challenge, voting will take place simultaneously on the app.',
+                    ),
+                    buildRulePoint(
+                      'The challenges are not compulsory but serve as entertainment for the Charles community and a ticket to convince other plus users to vote for you. All participating nominees are called to be as creative and entertaining as possible.',
+                    ),
+                    buildRulePoint(
+                      'Note that only plus users are allowed to vote.',
+                    ),
+                    buildRulePoint(
+                      'After another week, voting ends on the app and the winner(s) are rewarded with the cash from the current prize pool sent to their USDT wallet set in their profile section.',
+                    ),
+                    buildRulePoint(
+                      'This cycle repeats once every month. Happy Challenge!!',
+                    ),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Tap anywhere to close',
+                      style: TextStyle(color: Colors.white38, fontSize: 12),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

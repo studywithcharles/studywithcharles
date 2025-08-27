@@ -291,22 +291,27 @@ class SupabaseService {
     String? description,
     required DateTime startTime,
     required DateTime endTime,
+    required String repeat, // <-- always required (store 'none' if no repeat)
   }) async {
     final fb_auth.User? firebaseUser =
         fb_auth.FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) throw Exception('Not signed in');
     final newId = uuid.v4();
+
+    final insertData = {
+      'id': newId,
+      'user_id': firebaseUser.uid,
+      'group_id': groupId,
+      'title': title,
+      'description': description,
+      'start_time': startTime.toIso8601String(),
+      'end_time': endTime.toIso8601String(),
+      'repeat': repeat, // <-- always save the repeat mode
+    };
+
     final row = await supabase
         .from('events')
-        .insert({
-          'id': newId,
-          'user_id': firebaseUser.uid,
-          'group_id': groupId,
-          'title': title,
-          'description': description,
-          'start_time': startTime.toIso8601String(),
-          'end_time': endTime.toIso8601String(),
-        })
+        .insert(insertData)
         .select()
         .single();
     return Map<String, dynamic>.from(row as Map);
@@ -319,17 +324,18 @@ class SupabaseService {
     String? description,
     required DateTime startTime,
     required DateTime endTime,
+    required String repeat, // <-- always required
   }) async {
-    await supabase
-        .from('events')
-        .update({
-          'group_id': groupId,
-          'title': title,
-          'description': description,
-          'start_time': startTime.toIso8601String(),
-          'end_time': endTime.toIso8601String(),
-        })
-        .eq('id', eventId);
+    final updates = <String, dynamic>{
+      'group_id': groupId,
+      'title': title,
+      'description': description,
+      'start_time': startTime.toIso8601String(),
+      'end_time': endTime.toIso8601String(),
+      'repeat': repeat, // <-- always overwrite with current mode
+    };
+
+    await supabase.from('events').update(updates).eq('id', eventId);
   }
 
   Future<void> deleteEvent(String eventId) async {
