@@ -39,7 +39,7 @@ class _StudyListScreenState extends State<StudyListScreen>
   final List<String> _attachmentUrls = [];
   final List<String> _sessionAttachmentUrls = [];
   List<String> _permanentAttachmentUrls = [];
-  List<String> _contextRuleSessionUrls = [];
+  final List<String> _contextRuleSessionUrls = [];
 
   final TextEditingController _titleCtl = TextEditingController();
   String _selectedFormat = 'Summarize';

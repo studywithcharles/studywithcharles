@@ -421,19 +421,23 @@ class SupabaseService {
   // ===========================================================================
   // == TIMETABLE (SUBSCRIPTIONS)
   // ===========================================================================
-  /// Subscribe to another user's timetable by their username.
-  /// Calls the DB RPC `subscribe_to_timetable_by_username(p_username text)`.
+  /// Subscribe to another user's timetable by username.
+  /// Uses the RPC that accepts both the username and an explicit subscriber id
+  /// to avoid relying on auth.uid() inside Postgres.
   Future<void> subscribeToTimetable(String username) async {
     final name = username.trim();
     if (name.isEmpty) {
       throw Exception('Username cannot be empty.');
     }
 
-    // Call the RPC we created in the DB that looks up the target user by username
-    // and inserts a row into timetable_shares.
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in.');
+
+    // Call the RPC that accepts the subscriber id explicitly.
     await supabase.rpc(
-      'subscribe_to_timetable_by_username',
-      params: {'p_username': name},
+      'subscribe_to_timetable_by_username_with_subscriber',
+      params: {'p_username': name, 'p_subscriber_id': firebaseUser.uid},
     );
   }
 
@@ -447,43 +451,46 @@ class SupabaseService {
 
     final uid = firebaseUser.uid;
 
-    // We'll select from timetable_shares and join the users table to return
-    // the chopped-down user info the UI needs.
+    // 1. Fetch from 'timetable_shares' where WE are the 'shared_user_id'.
+    // 2. Explicitly join the 'users' table using the 'owner_id' to get the profile of the person we subscribed to.
     final rows = await supabase
         .from('timetable_shares')
         .select(
-          'shared_user_id, created_at, shared_user:users(id, display_name, username, avatar_url)',
+          '*, owner:users!owner_id(id, display_name, username, avatar_url)',
         )
-        .eq('owner_id', uid)
+        .eq('shared_user_id', uid) // <-- FIX 1: Filtered correctly
         .order('created_at', ascending: false);
 
-    // ignore: unnecessary_null_comparison
-    if (rows == null) return <Map<String, dynamic>>[];
-
-    // Convert to consistent List<Map<String,dynamic>> format expected by UI
-    final list = (rows as List).map((r) {
-      final map = Map<String, dynamic>.from(r as Map);
-      // the joined user columns will be under 'shared_user'
-      final joined = map['shared_user'] as Map<String, dynamic>? ?? {};
-      return {
-        'id': joined['id'] ?? map['shared_user_id'],
-        'display_name': joined['display_name'],
-        'username': joined['username'],
-        'avatar_url': joined['avatar_url'],
-        'created_at': map['created_at'],
-      };
+    // 3. The user data is now nested under 'owner'. This code flattens it
+    //    so your UI code doesn't need to change.
+    final list = (rows as List).map((row) {
+      final map = Map<String, dynamic>.from(row as Map);
+      final ownerProfile = map.remove('owner'); // <-- Use the 'owner' alias
+      if (ownerProfile != null) {
+        map.addAll(Map<String, dynamic>.from(ownerProfile));
+      }
+      return map;
     }).toList();
 
     return List<Map<String, dynamic>>.from(list);
   }
 
-  Future<void> unsubscribeFromTimetable(String sharedUserId) async {
-    final id = sharedUserId.trim();
-    if (id.isEmpty) return;
-    await supabase.rpc(
-      'unsubscribe_from_timetable',
-      params: {'p_shared_user_id': id},
-    );
+  Future<void> unsubscribeFromTimetable(String ownerId) async {
+    // Mirror for compatibility — calls the real deletion method
+    return unsubscribeFromTimetableByOwner(ownerId);
+  }
+
+  // In SupabaseService (add near other subscription methods)
+  Future<void> unsubscribeFromTimetableByOwner(String ownerId) async {
+    final fb_auth.User? firebaseUser =
+        fb_auth.FirebaseAuth.instance.currentUser;
+    if (firebaseUser == null) throw Exception('Not signed in');
+
+    // Delete the exact share row (owner_id = ownerId, shared_user_id = current user)
+    await supabase.from('timetable_shares').delete().match({
+      'owner_id': ownerId,
+      'shared_user_id': firebaseUser.uid,
+    });
   }
 
   /// Fetch addon stats for a username. Expects RPC `get_timetable_addon_stats(p_username text)`

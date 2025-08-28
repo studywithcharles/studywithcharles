@@ -1478,46 +1478,13 @@ class _TimetableScreenState extends State<TimetableScreen> {
                     }
                   }
 
-                  Future<void> removeShare(String sharedUserId) async {
-                    final confirm = await showDialog<bool>(
-                      context: context,
-                      builder: (dctx) => AlertDialog(
-                        backgroundColor: const Color.fromRGBO(30, 30, 30, 0.9),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        title: const Text(
-                          'Remove timetable',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                        content: const Text(
-                          'Are you sure you want to remove this added timetable?',
-                          style: TextStyle(color: Colors.white70),
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(dctx).pop(false),
-                            child: const Text('Cancel'),
-                          ),
-                          TextButton(
-                            onPressed: () => Navigator.of(dctx).pop(true),
-                            child: const Text(
-                              'Remove',
-                              style: TextStyle(color: Colors.red),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-
-                    if (confirm != true) return;
-
+                  Future<void> removeShare(String ownerId) async {
+                    // ownerId is the ID of the timetable owner (what you used earlier as `id`)
                     try {
-                      await SupabaseService.instance.unsubscribeFromTimetable(
-                        sharedUserId,
-                      );
-                      await refresh();
-                      await _loadEvents();
+                      await SupabaseService.instance
+                          .unsubscribeFromTimetableByOwner(ownerId);
+                      await refresh(); // refresh local list inside sheet
+                      await _loadEvents(); // refresh calendar events
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(
@@ -1625,32 +1592,70 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                             color: Colors.white70,
                                           ),
                                         ),
-                                        trailing: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            IconButton(
-                                              tooltip: 'View events',
-                                              onPressed: () {
-                                                Navigator.of(context).pop();
-                                                setState(
-                                                  () => _selectedUserId = id,
-                                                );
-                                              },
-                                              icon: const Icon(
-                                                Icons.visibility,
-                                                color: Colors.cyanAccent,
+                                        trailing: IconButton(
+                                          tooltip: 'Remove timetable',
+                                          onPressed: () async {
+                                            // Confirm using the same styling as your other delete dialogs
+                                            final confirm = await showDialog<bool>(
+                                              context: context,
+                                              builder: (dctx) => AlertDialog(
+                                                backgroundColor:
+                                                    const Color.fromRGBO(
+                                                      30,
+                                                      30,
+                                                      30,
+                                                      0.9,
+                                                    ),
+                                                shape: RoundedRectangleBorder(
+                                                  borderRadius:
+                                                      BorderRadius.circular(16),
+                                                ),
+                                                title: const Text(
+                                                  'Remove timetable',
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                  ),
+                                                ),
+                                                content: const Text(
+                                                  'Are you sure you want to remove this added timetable? This will stop its events from appearing on your calendar.',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                  ),
+                                                ),
+                                                actions: [
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.of(
+                                                          dctx,
+                                                        ).pop(false),
+                                                    child: const Text('Cancel'),
+                                                  ),
+                                                  TextButton(
+                                                    onPressed: () =>
+                                                        Navigator.of(
+                                                          dctx,
+                                                        ).pop(true),
+                                                    child: const Text(
+                                                      'Remove',
+                                                      style: TextStyle(
+                                                        color: Colors.red,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
-                                            ),
-                                            IconButton(
-                                              tooltip: 'Remove',
-                                              onPressed: () => removeShare(id),
-                                              icon: const Icon(
-                                                Icons.link_off,
-                                                color: Colors.redAccent,
-                                              ),
-                                            ),
-                                          ],
+                                            );
+
+                                            if (confirm == true) {
+                                              await removeShare(id);
+                                            }
+                                          },
+                                          icon: const Icon(
+                                            Icons.delete,
+                                            color: Colors.redAccent,
+                                          ),
                                         ),
+
                                         onTap: () {
                                           Navigator.of(context).pop();
                                           setState(() => _selectedUserId = id);
