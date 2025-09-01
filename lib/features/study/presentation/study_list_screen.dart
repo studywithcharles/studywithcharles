@@ -26,6 +26,7 @@ class StudyListScreen extends StatefulWidget {
 class _StudyListScreenState extends State<StudyListScreen>
     with WidgetsBindingObserver {
   String? _currentContextId;
+  Map<String, dynamic>? _userProfile;
   bool _showScrollToBottomButton = false;
   bool _isDiagramMode = false;
 
@@ -77,23 +78,47 @@ class _StudyListScreenState extends State<StudyListScreen>
   Future<void> _loadInitialData() async {
     setState(() => _isLoading = true);
     try {
-      final contexts = await SupabaseService.instance.fetchContexts();
-      if (!mounted) return;
+      final currentUser = Supabase.instance.client.auth.currentUser;
+      if (currentUser == null) {
+        print('loadInitialData: no authenticated user found');
+        throw Exception('User not authenticated');
+      }
+      final userId = currentUser.id;
 
-      // Clear all session state
+      print('loadInitialData: fetching contexts and profile for user $userId');
+
+      // Fetch both in parallel, add a timeout to avoid indefinite waits
+      final results =
+          await Future.wait([
+            SupabaseService.instance.fetchContexts(),
+            SupabaseService.instance.fetchUserProfile(userId),
+          ]).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () {
+              throw Exception('fetchContexts/fetchUserProfile timed out (15s)');
+            },
+          );
+
+      if (!mounted) {
+        print('loadInitialData: widget unmounted before setting state');
+        return;
+      }
+
+      print('loadInitialData: fetch succeeded');
+
       setState(() {
-        _savedContexts = contexts;
+        _savedContexts = results[0] as List<Map<String, dynamic>>;
+        _userProfile = results[1] as Map<String, dynamic>;
         _currentContextId = null;
         _messages.clear();
-        _sessionAttachmentUrls.clear(); // Clear session attachments
-        _permanentAttachmentUrls.clear(); // Clear permanent attachments
+        _sessionAttachmentUrls.clear();
+        _permanentAttachmentUrls.clear();
         _isLoading = false;
       });
-    } catch (e) {
+    } catch (e, st) {
+      print('loadInitialData error: $e\n$st');
       _showGlassSnackBar('Error loading data: $e', isError: true);
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -103,18 +128,27 @@ class _StudyListScreenState extends State<StudyListScreen>
       SnackBar(
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-        backgroundColor: isError
-            ? const Color.fromRGBO(0, 0, 0, 0.8)
-            : const Color.fromRGBO(0, 0, 0, 0.6),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        content: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-          child: Text(
-            message,
-            style: const TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w500,
-            ),
+        backgroundColor: Colors.transparent, // Make the wrapper transparent
+        elevation: 0, // Remove shadow
+        content: GlassContainer(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Icon(
+                isError ? Icons.error_outline : Icons.check_circle_outline,
+                color: isError ? Colors.redAccent : Colors.greenAccent,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  message,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -213,25 +247,39 @@ class _StudyListScreenState extends State<StudyListScreen>
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (_) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: ClipRRect(
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              color: const Color.fromRGBO(255, 255, 255, 0.1),
-              padding: const EdgeInsets.all(16),
-              child: _savedContexts.isEmpty
-                  ? const Center(
+      isScrollControlled: true, // Allows the sheet to be taller if needed
+      builder: (_) => StatefulBuilder(
+        // Use a StatefulBuilder to manage state within the sheet
+        builder: (BuildContext context, StateSetter setModalState) {
+          return GlassContainer(
+            borderRadius: 16,
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min, // Make the sheet wrap its content
+              children: [
+                Text(
+                  'Saved Cards',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.cyanAccent,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (_savedContexts.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24.0),
+                    child: Center(
                       child: Text(
                         'No saved cards.',
                         style: TextStyle(color: Colors.white70),
                       ),
-                    )
-                  : ListView.builder(
+                    ),
+                  )
+                else
+                  // Make the list scrollable if it's too long
+                  Flexible(
+                    child: ListView.builder(
                       shrinkWrap: true,
                       itemCount: _savedContexts.length,
                       itemBuilder: (_, idx) {
@@ -244,6 +292,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                             style: const TextStyle(color: Colors.white),
                           ),
                           onTap: () async {
+                            // (Your existing onTap logic remains the same)
                             Navigator.of(context).pop();
                             setState(() => _isLoading = true);
                             try {
@@ -276,9 +325,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                                 _messages.clear();
                                 _sessionAttachmentUrls.clear();
                                 _permanentAttachmentUrls = attachments;
-
                                 _titleCtl.text = fullContextData['title'] ?? '';
-                                // The two lines causing errors have been removed.
 
                                 for (final m in messages) {
                                   _messages.add({
@@ -299,7 +346,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                           },
                           trailing: IconButton(
                             icon: const Icon(
-                              Icons.delete,
+                              Icons.delete_outline,
                               color: Colors.redAccent,
                             ),
                             onPressed: () =>
@@ -308,41 +355,96 @@ class _StudyListScreenState extends State<StudyListScreen>
                         );
                       },
                     ),
+                  ),
+              ],
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
   }
 
   /// Shows a “delete this card?” dialog, deletes it if confirmed,
   /// then refreshes the list.
+  /// Shows a themed dialog to confirm deleting a card.
   Future<void> _confirmDelete(String contextId, String title) async {
-    final shouldDelete = await showDialog<bool>(
+    final shouldDelete = await showGeneralDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete saved card?'),
-        content: Text('Are you sure you want to delete "$title"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+      barrierDismissible: true,
+      barrierLabel: 'Delete Card',
+      transitionDuration: const Duration(milliseconds: 200),
+      pageBuilder: (context, anim1, anim2) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: GlassContainer(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Delete Saved Card?',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Are you sure you want to delete "$title"? This action cannot be undone.',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: const Text(
+                        'Cancel',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent,
+                      ),
+                      onPressed: () => Navigator.of(context).pop(true),
+                      child: const Text(
+                        'Delete',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+        );
+      },
     );
 
     if (shouldDelete == true) {
-      await SupabaseService.instance.deleteContext(contextId);
-      _showGlassSnackBar('Deleted "$title"');
-      // If sheet is still open, close it
-      if (Navigator.canPop(context)) Navigator.pop(context);
-      // Refresh
-      await _loadInitialData();
+      // We wrap this in a try-catch for safety
+      try {
+        setState(() => _isLoading = true);
+        await SupabaseService.instance.deleteContext(contextId);
+        _showGlassSnackBar('Deleted "$title"');
+        // If the modal sheet for saved cards is still open, close it
+        if (Navigator.canPop(context)) {
+          final currentRoute = ModalRoute.of(context);
+          if (currentRoute is ModalBottomSheetRoute) {
+            Navigator.pop(context);
+          }
+        }
+        // Refresh the contexts list
+        await _loadInitialData();
+      } catch (e) {
+        _showGlassSnackBar('Error deleting card: $e', isError: true);
+      } finally {
+        if (mounted) setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -545,6 +647,7 @@ class _StudyListScreenState extends State<StudyListScreen>
   }
 
   /// Handles the logic for saving a new card for the first time.
+  /// Handles the logic for saving a new card for the first time.
   Future<void> _handleSaveCard() async {
     // 1. Do nothing if the card is already saved.
     if (_currentContextId != null) {
@@ -560,10 +663,9 @@ class _StudyListScreenState extends State<StudyListScreen>
       return;
     }
 
-    // 3. TODO: Implement your subscription check here
-    // For now, we'll assume a hardcoded limit of 3 for free users.
-    final isPlusUser =
-        false; // Replace with actual check, e.g. AuthService.instance.isPlusUser()
+    // --- FIX IS HERE ---
+    // 3. Check subscription status using the fetched profile.
+    final isPlusUser = _userProfile?['is_premium'] ?? false;
     if (!isPlusUser && _savedContexts.length >= 3) {
       _showGlassSnackBar(
         'Free users can only save up to 3 cards. Upgrade to Plus for unlimited saves!',
@@ -585,12 +687,10 @@ class _StudyListScreenState extends State<StudyListScreen>
     try {
       final newContextId = await SupabaseService.instance.createContext(
         title: _titleCtl.text.trim(),
-        // The other context rule fields are now removed. Add them back if needed.
-        resultFormat: 'Summarize', // Or a default value
+        resultFormat: 'Summarize', // Default value
         moreContext: null,
       );
 
-      // Save the card content (messages).
       await SupabaseService.instance.saveCard(
         contextId: newContextId,
         content: {'messages': _messages},
@@ -783,7 +883,7 @@ class _StudyListScreenState extends State<StudyListScreen>
     final bool wasDiagramMode = _isDiagramMode;
     final attachmentsForThisMessage = List<String>.from(_sessionAttachmentUrls);
 
-    // Update the UI immediately
+    // Update the UI immediately (add user items + typing indicator)
     setState(() {
       for (final url in attachmentsForThisMessage) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
@@ -797,21 +897,31 @@ class _StudyListScreenState extends State<StudyListScreen>
     _scrollToBottom();
 
     try {
-      // Determine which function and payload to use
+      // Build trimmed history (exclude the "typing" indicator which is the last item)
+      final int historyLimit = 8;
+      List<Map<String, String>> rawHistory = [];
+      if (_messages.length >= 2) {
+        // Exclude the final typing indicator
+        rawHistory = List<Map<String, String>>.from(
+          _messages.sublist(0, _messages.length - 1),
+        );
+      }
+      final List<Map<String, String>> trimmedHistory =
+          rawHistory.length > historyLimit
+          ? rawHistory.sublist(rawHistory.length - historyLimit)
+          : rawHistory;
+
+      // Choose function and payload
       final String functionName = wasDiagramMode ? 'image-proxy' : 'text-proxy';
       final String aiResponseType = wasDiagramMode ? 'image' : 'text';
 
       final Map<String, dynamic> payload;
-
       if (wasDiagramMode) {
-        // Payload for generating diagrams
         payload = {'prompt': promptText};
       } else {
-        // --- NEW, SIMPLER PAYLOAD FOR TEXT ---
-        // Matches the new Supabase function
         payload = {
           'prompt': promptText,
-          'chat_history': _messages.sublist(0, _messages.length - 1),
+          'chat_history': trimmedHistory,
           'attachments': {
             'session': attachmentsForThisMessage,
             'context': _permanentAttachmentUrls,
@@ -820,12 +930,24 @@ class _StudyListScreenState extends State<StudyListScreen>
         };
       }
 
-      // Call the function
-      final response = await Supabase.instance.client.functions.invoke(
+      print(
+        'sendMessage: invoking $functionName with prompt "${promptText}" and history length ${trimmedHistory.length}',
+      );
+
+      // Invoke with timeout so UI won't hang indefinitely
+      final Future invokeFuture = Supabase.instance.client.functions.invoke(
         functionName,
         body: payload,
       );
 
+      final response = await invokeFuture.timeout(
+        const Duration(seconds: 20),
+        onTimeout: () => throw Exception(
+          'AI function timed out (20s). Try again or send less history.',
+        ),
+      );
+
+      // Response validation
       if (response.status != 200) {
         final errorData = response.data as Map<String, dynamic>?;
         final errorMessage = errorData?['error'] ?? 'Unknown AI error';
@@ -835,8 +957,12 @@ class _StudyListScreenState extends State<StudyListScreen>
       final aiText = response.data['response'] as String;
 
       if (!mounted) return;
+
       setState(() {
-        _messages.removeLast(); // Remove typing indicator
+        // Remove typing indicator if present
+        if (_messages.isNotEmpty && _messages.last['type'] == 'typing') {
+          _messages.removeLast();
+        }
         _messages.add({
           'role': 'assistant',
           'text': aiText,
@@ -847,14 +973,24 @@ class _StudyListScreenState extends State<StudyListScreen>
 
       // Auto-save if the card is already saved
       if (_currentContextId != null) {
-        await SupabaseService.instance.saveCard(
-          contextId: _currentContextId!,
-          content: {'messages': _messages},
-        );
+        try {
+          await SupabaseService.instance.saveCard(
+            contextId: _currentContextId!,
+            content: {'messages': _messages},
+          );
+        } catch (saveErr) {
+          print('sendMessage: auto-save failed: $saveErr');
+        }
       }
-    } catch (e) {
+    } catch (e, st) {
+      print('sendMessage error: $e\n$st');
       if (!mounted) return;
-      setState(() => _messages.removeLast());
+      // Remove typing indicator if left behind
+      setState(() {
+        if (_messages.isNotEmpty && _messages.last['type'] == 'typing') {
+          _messages.removeLast();
+        }
+      });
       _showGlassSnackBar(e.toString(), isError: true);
     }
   }
@@ -867,7 +1003,7 @@ class _StudyListScreenState extends State<StudyListScreen>
         automaticallyImplyLeading: false,
         backgroundColor: Colors.black,
         elevation: 0,
-        scrolledUnderElevation: 0.0, // Prevents color change on scroll
+        scrolledUnderElevation: 0.0,
         title: const Text(
           'Study Section',
           style: TextStyle(fontWeight: FontWeight.w900, fontFamily: 'Roboto'),
@@ -887,9 +1023,28 @@ class _StudyListScreenState extends State<StudyListScreen>
             child: Stack(
               children: [
                 _buildCardContent(),
+                // Polished Loading Indicator
                 if (_isLoading)
-                  const Center(child: CircularProgressIndicator()),
-                if (_showScrollToBottomButton)
+                  Container(
+                    color: Colors.black.withOpacity(0.5),
+                    child: Center(
+                      child: GlassContainer(
+                        padding: const EdgeInsets.all(24),
+                        child: const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(color: Colors.white),
+                            SizedBox(height: 20),
+                            Text(
+                              'Loading Card...',
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                if (_showScrollToBottomButton && !_isLoading)
                   Positioned(
                     left: 0,
                     right: 0,
@@ -978,7 +1133,6 @@ class _StudyListScreenState extends State<StudyListScreen>
                         ),
                         child: Row(
                           children: [
-                            // Diagram mode now shows just an icon inside the text bar
                             if (_isDiagramMode)
                               Padding(
                                 padding: const EdgeInsets.only(left: 8.0),
