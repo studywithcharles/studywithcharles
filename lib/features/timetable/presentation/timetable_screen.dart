@@ -7,6 +7,7 @@ import 'package:table_calendar/table_calendar.dart';
 import 'package:studywithcharles/shared/services/auth_service.dart';
 import 'package:studywithcharles/shared/services/supabase_service.dart';
 import 'manage_groups_screen.dart';
+import 'package:studywithcharles/shared/widgets/glass_container.dart';
 
 class TimetableScreen extends StatefulWidget {
   const TimetableScreen({super.key});
@@ -35,6 +36,26 @@ class _TimetableScreenState extends State<TimetableScreen> {
     );
     _currentUserId = AuthService.instance.currentUser?.uid;
     _initAll();
+  }
+
+  // Helper: returns true if the id looks like a synthetic expanded occurrence (e.g. "<uuid>_r3")
+  bool _isSyntheticOccurrenceId(String? id) {
+    if (id == null) return false;
+    return id.contains('_r');
+  }
+
+  // Centralized SnackBar for synthetic-occurrence edit/delete attempts
+  void _showCannotEditOccurrenceSnack() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'This is a single instance of a recurring event and cannot be edited or deleted individually. '
+          'Open the original event to edit the series.',
+        ),
+        backgroundColor: Colors.orange,
+      ),
+    );
   }
 
   Future<void> _initAll() async {
@@ -75,12 +96,35 @@ class _TimetableScreenState extends State<TimetableScreen> {
   Future<void> _loadSharedUsers() async {
     try {
       final users = await SupabaseService.instance.getMySharedUsers();
+
+      // Enrich each owner with their addon stats (concurrently)
+      final futures = users.map((u) async {
+        final owner = Map<String, dynamic>.from(u as Map);
+        final username = owner['username'] as String? ?? '';
+        if (username.isNotEmpty) {
+          try {
+            final stats = await SupabaseService.instance
+                .fetchTimetableAddonStats(username);
+            owner['owner_total_addons'] = stats['total'] ?? 0;
+            owner['owner_plus_addons'] = stats['plus'] ?? 0;
+          } catch (_) {
+            owner['owner_total_addons'] = 0;
+            owner['owner_plus_addons'] = 0;
+          }
+        } else {
+          owner['owner_total_addons'] = 0;
+          owner['owner_plus_addons'] = 0;
+        }
+        return owner;
+      }).toList();
+
+      final enriched = await Future.wait(futures);
+
       if (!mounted) return;
       setState(() {
-        _addedTimetables = List<Map<String, dynamic>>.from(users);
+        _addedTimetables = List<Map<String, dynamic>>.from(enriched);
       });
     } catch (e) {
-      // non-fatal
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not load added timetables: $e')),
@@ -90,8 +134,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   /// Loads events and organizes them into a Map keyed by local date (midnight).
-  /// Improved error handling: suppresses the common 'invalid input syntax for type uuid'
-  /// noise and avoids repeatedly showing SnackBars when navigation simply refreshes the screen.
+  /// Enriches each event occurrence with owner_username and owner_avatar_url
+  /// (from the event payload if present, or by looking up _addedTimetables).
   Future<void> _loadEvents() async {
     if (!mounted) return;
     setState(() => _loading = true);
@@ -114,7 +158,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
         if (rawStart is String) {
           utcStart = DateTime.parse(rawStart).toUtc();
         } else if (rawStart is DateTime) {
-          utcStart = (rawStart).toUtc();
+          utcStart = rawStart.toUtc();
         } else {
           continue; // skip malformed
         }
@@ -122,13 +166,54 @@ class _TimetableScreenState extends State<TimetableScreen> {
         if (rawEnd is String) {
           utcEnd = DateTime.parse(rawEnd).toUtc();
         } else if (rawEnd is DateTime) {
-          utcEnd = (rawEnd).toUtc();
+          utcEnd = rawEnd.toUtc();
         } else {
           // fallback: assume 1-hour event
           utcEnd = utcStart.add(const Duration(hours: 1));
         }
 
         final repeat = (event['repeat'] as String?) ?? 'none';
+
+        // --- Determine owner info (try several places) ---
+        String? ownerId;
+        String? ownerUsername;
+        String? ownerAvatarUrl;
+
+        final ownerRaw =
+            event['event_owner'] ?? event['owner'] ?? event['user'];
+
+        if (ownerRaw is Map) {
+          final ownerMap = Map<String, dynamic>.from(ownerRaw);
+          ownerId = ownerMap['id']?.toString();
+          ownerUsername = ownerMap['username']?.toString();
+          ownerAvatarUrl = ownerMap['avatar_url']?.toString();
+        } else if (ownerRaw is String) {
+          ownerId = ownerRaw;
+        }
+
+        // fallback to dedicated owner_id/user_id field if present and ownerId still null
+        if (ownerId == null &&
+            (event['owner_id'] is String || event['user_id'] is String)) {
+          ownerId =
+              (event['owner_id'] as String?) ?? (event['user_id'] as String?);
+        }
+
+        // If username/avatar still not found, try matching against the loaded _addedTimetables
+        if ((ownerUsername == null || ownerAvatarUrl == null) &&
+            ownerId != null) {
+          try {
+            final match = _addedTimetables.firstWhere(
+              (u) => (u['id']?.toString() ?? '') == ownerId,
+              orElse: () => <String, dynamic>{},
+            );
+            if (match.isNotEmpty) {
+              ownerUsername ??= match['username'] as String?;
+              ownerAvatarUrl ??= match['avatar_url'] as String?;
+            }
+          } catch (_) {
+            // ignore
+          }
+        }
 
         // Helper to add an occurrence to the map (using a copy so original data isn't mutated)
         void addOccurrence(
@@ -139,12 +224,27 @@ class _TimetableScreenState extends State<TimetableScreen> {
           final local = occurrenceStartUtc.toLocal();
           final key = DateTime(local.year, local.month, local.day);
 
-          // Make a shallow copy and inject a synthetic id for repeated instances
+          // Make a shallow copy and choose id carefully:
+          // - If this is the first occurrence (index 0), keep the original DB id so edits/deletes work.
+          // - For expanded repeated occurrences (index > 0), append _rN to avoid collisions.
           final copy = Map<String, dynamic>.from(event);
-          // Keep original id but append index so that UI actions that depend on id won't collide.
-          copy['id'] = '${event['id']}_r$occurrenceIndex';
+          final originalId = event['id']?.toString() ?? '';
+
+          if (occurrenceIndex == 0) {
+            // keep exact DB id for first occurrence
+            copy['id'] = originalId;
+          } else {
+            // synthetic id for expanded occurrences only
+            copy['id'] = '${originalId}_r$occurrenceIndex';
+          }
+
           copy['start_time'] = occurrenceStartUtc.toIso8601String();
           copy['end_time'] = occurrenceEndUtc.toIso8601String();
+
+          // Attach owner metadata for easier rendering later
+          if (ownerId != null) copy['owner_id'] = ownerId;
+          if (ownerUsername != null) copy['owner_username'] = ownerUsername;
+          if (ownerAvatarUrl != null) copy['owner_avatar_url'] = ownerAvatarUrl;
 
           temp.putIfAbsent(key, () => []).add(copy);
         }
@@ -154,13 +254,10 @@ class _TimetableScreenState extends State<TimetableScreen> {
           addOccurrence(utcStart, utcEnd, 0);
         } else {
           // expand recurring occurrences between now (or original start) and horizonEnd
-          // Start expansion from the later of original start and now - 1 day.
           DateTime current = utcStart;
-          // If first occurrence is before 'now', move forward to the first occurrence >= now - 1 day
           if (current.toLocal().isBefore(
             now.subtract(const Duration(days: 1)),
           )) {
-            // Advance current up to near 'now' depending on repeat type
             if (repeat == 'daily') {
               final daysDiff = now.toUtc().difference(current).inDays;
               final skip = daysDiff > 0 ? daysDiff - 1 : 0;
@@ -170,7 +267,6 @@ class _TimetableScreenState extends State<TimetableScreen> {
               final skip = weeksDiff > 0 ? weeksDiff - 1 : 0;
               current = current.add(Duration(days: skip * 7));
             } else if (repeat == 'monthly') {
-              // approximate: move by months until close to now
               while (current.toLocal().isBefore(
                 now.subtract(const Duration(days: 1)),
               )) {
@@ -186,23 +282,17 @@ class _TimetableScreenState extends State<TimetableScreen> {
             }
           }
 
-          // iterate occurrences until horizonEnd (safety limit)
           int idx = 0;
           DateTime occStart = current;
-          DateTime occEnd = utcEnd.add(
-            occStart.difference(utcStart),
-          ); // maintain duration
+          DateTime occEnd = utcEnd.add(occStart.difference(utcStart));
 
-          // If the initial occurrence is before now - include it only if within horizon
           while (occStart.toLocal().isBefore(horizonEnd)) {
-            // only add occurrences that are not too far in the past (optional: include past few days)
             if (!occEnd.toLocal().isBefore(
               now.subtract(const Duration(days: 365)),
             )) {
               addOccurrence(occStart, occEnd, idx);
             }
 
-            // advance to next occurrence
             if (repeat == 'daily') {
               occStart = occStart.add(const Duration(days: 1));
               occEnd = occEnd.add(const Duration(days: 1));
@@ -222,11 +312,9 @@ class _TimetableScreenState extends State<TimetableScreen> {
               occStart = nextStartLocal;
               occEnd = occStart.add(dur);
             } else {
-              // unknown repeat type — break
               break;
             }
             idx++;
-            // safety guard: don't create infinite loops
             if (idx > 500) break;
           }
         }
@@ -347,163 +435,65 @@ class _TimetableScreenState extends State<TimetableScreen> {
               padding: EdgeInsets.only(
                 bottom: MediaQuery.of(modalContext).viewInsets.bottom,
               ),
-              child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(20),
-                ),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    height: MediaQuery.of(context).size.height * 0.75,
-                    color: Colors.black.withOpacity(0.7),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Column(
-                      children: [
-                        _buildDragHandle(),
-                        Expanded(
-                          child: Form(
-                            key: formKey,
-                            child: SingleChildScrollView(
-                              padding: const EdgeInsets.only(bottom: 24),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  const Text(
-                                    'New Event',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: Colors.cyanAccent,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.bold,
+              child: GlassContainer(
+                borderRadius: 20.0,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: SizedBox(
+                  height: MediaQuery.of(context).size.height * 0.75,
+                  child: Column(
+                    children: [
+                      _buildDragHandle(),
+                      Expanded(
+                        child: Form(
+                          key: formKey,
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.only(bottom: 24),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                const Text(
+                                  'New Event',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.cyanAccent,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                TextFormField(
+                                  decoration: const InputDecoration(
+                                    labelText: 'Title',
+                                    labelStyle: TextStyle(
+                                      color: Colors.white70,
                                     ),
                                   ),
-                                  const SizedBox(height: 12),
-                                  TextFormField(
-                                    decoration: const InputDecoration(
-                                      labelText: 'Title',
-                                      labelStyle: TextStyle(
-                                        color: Colors.white70,
-                                      ),
+                                  style: const TextStyle(color: Colors.white),
+                                  validator: (v) => (v == null || v.isEmpty)
+                                      ? 'Enter a title'
+                                      : null,
+                                  onSaved: (v) => title = v,
+                                ),
+                                const SizedBox(height: 12),
+                                TextFormField(
+                                  decoration: const InputDecoration(
+                                    labelText: 'Description (optional)',
+                                    labelStyle: TextStyle(
+                                      color: Colors.white70,
                                     ),
-                                    style: const TextStyle(color: Colors.white),
-                                    validator: (v) => (v == null || v.isEmpty)
-                                        ? 'Enter a title'
-                                        : null,
-                                    onSaved: (v) => title = v,
                                   ),
-                                  const SizedBox(height: 12),
-                                  TextFormField(
-                                    decoration: const InputDecoration(
-                                      labelText: 'Description (optional)',
-                                      labelStyle: TextStyle(
-                                        color: Colors.white70,
-                                      ),
-                                    ),
-                                    style: const TextStyle(color: Colors.white),
-                                    maxLines: 2,
-                                    onSaved: (v) => description = v,
-                                  ),
-                                  const SizedBox(height: 12),
-                                  if (groupItems.isNotEmpty)
-                                    DropdownButtonFormField<String>(
-                                      value: selectedGroupId,
-                                      hint: const Text(
-                                        'Assign to a group (optional)',
-                                        style: TextStyle(color: Colors.white70),
-                                      ),
-                                      dropdownColor: const Color.fromRGBO(
-                                        30,
-                                        30,
-                                        30,
-                                        1,
-                                      ),
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                      ),
-                                      items: groupItems,
-                                      onChanged: (v) => setModalState(
-                                        () => selectedGroupId = v,
-                                      ),
-                                      onSaved: (v) => selectedGroupId = v,
-                                    ),
-                                  const SizedBox(height: 12),
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          const Text(
-                                            'Starts at:',
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          TextButton(
-                                            onPressed: () async {
-                                              final picked =
-                                                  await showTimePicker(
-                                                    context: modalContext,
-                                                    initialTime: startTime,
-                                                  );
-                                              if (picked != null) {
-                                                setModalState(
-                                                  () => startTime = picked,
-                                                );
-                                              }
-                                            },
-                                            child: Text(
-                                              startTime.format(modalContext),
-                                              style: const TextStyle(
-                                                color: Colors.cyanAccent,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      Row(
-                                        children: [
-                                          const Text(
-                                            'Ends at:',
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          TextButton(
-                                            onPressed: () async {
-                                              final picked =
-                                                  await showTimePicker(
-                                                    context: modalContext,
-                                                    initialTime: endTime,
-                                                  );
-                                              if (picked != null) {
-                                                setModalState(
-                                                  () => endTime = picked,
-                                                );
-                                              }
-                                            },
-                                            child: Text(
-                                              endTime.format(modalContext),
-                                              style: const TextStyle(
-                                                color: Colors.cyanAccent,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 12),
+                                  style: const TextStyle(color: Colors.white),
+                                  maxLines: 2,
+                                  onSaved: (v) => description = v,
+                                ),
+                                const SizedBox(height: 12),
+                                if (groupItems.isNotEmpty)
                                   DropdownButtonFormField<String>(
-                                    value: repeat,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Repeat',
-                                      labelStyle: TextStyle(
-                                        color: Colors.white70,
-                                      ),
+                                    value: selectedGroupId,
+                                    hint: const Text(
+                                      'Assign to a group (optional)',
+                                      style: TextStyle(color: Colors.white70),
                                     ),
                                     dropdownColor: const Color.fromRGBO(
                                       30,
@@ -512,112 +502,199 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                       1,
                                     ),
                                     style: const TextStyle(color: Colors.white),
-                                    items: const [
-                                      DropdownMenuItem(
-                                        value: 'none',
-                                        child: Text('Does not repeat'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'daily',
-                                        child: Text('Every day'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'weekly',
-                                        child: Text('Every week'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'monthly',
-                                        child: Text('Every month'),
-                                      ),
-                                    ],
+                                    items: groupItems,
                                     onChanged: (v) => setModalState(
-                                      () => repeat = v ?? 'none',
+                                      () => selectedGroupId = v,
                                     ),
-                                    onSaved: (v) => repeat = v ?? 'none',
+                                    onSaved: (v) => selectedGroupId = v,
                                   ),
-                                  const SizedBox(height: 24),
-                                  ElevatedButton(
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.cyanAccent,
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 16,
-                                      ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                    ),
-                                    onPressed: () async {
-                                      if (!(formKey.currentState?.validate() ??
-                                          false)) {
-                                        return;
-                                      }
-                                      formKey.currentState?.save();
-
-                                      final startDT = DateTime(
-                                        _selectedDay!.year,
-                                        _selectedDay!.month,
-                                        _selectedDay!.day,
-                                        startTime.hour,
-                                        startTime.minute,
-                                      );
-                                      final endDT = DateTime(
-                                        _selectedDay!.year,
-                                        _selectedDay!.month,
-                                        _selectedDay!.day,
-                                        endTime.hour,
-                                        endTime.minute,
-                                      );
-
-                                      try {
-                                        await SupabaseService.instance
-                                            .createEvent(
-                                              groupId: selectedGroupId,
-                                              title: title!,
-                                              description: description,
-                                              startTime: startDT,
-                                              endTime: endDT,
-                                              repeat: repeat == 'none'
-                                                  ? ''
-                                                  : repeat,
+                                const SizedBox(height: 12),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Text(
+                                          'Starts at:',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        TextButton(
+                                          onPressed: () async {
+                                            final picked = await showTimePicker(
+                                              context: modalContext,
+                                              initialTime: startTime,
                                             );
-                                        if (!mounted) return;
-                                        Navigator.of(modalContext).pop();
-                                        await _loadEvents();
-                                        if (!mounted) return;
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          const SnackBar(
-                                            content: Text('Event saved'),
-                                            backgroundColor: Colors.green,
-                                          ),
-                                        );
-                                      } catch (e) {
-                                        if (!mounted) return;
-                                        ScaffoldMessenger.of(
-                                          context,
-                                        ).showSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                              'Error saving event: $e',
+                                            if (picked != null) {
+                                              setModalState(
+                                                () => startTime = picked,
+                                              );
+                                            }
+                                          },
+                                          child: Text(
+                                            startTime.format(modalContext),
+                                            style: const TextStyle(
+                                              color: Colors.cyanAccent,
                                             ),
-                                            backgroundColor: Colors.red,
                                           ),
-                                        );
-                                      }
-                                    },
-                                    child: const Text(
-                                      'Save Event',
-                                      style: TextStyle(color: Colors.black),
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      children: [
+                                        const Text(
+                                          'Ends at:',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        TextButton(
+                                          onPressed: () async {
+                                            final picked = await showTimePicker(
+                                              context: modalContext,
+                                              initialTime: endTime,
+                                            );
+                                            if (picked != null) {
+                                              setModalState(
+                                                () => endTime = picked,
+                                              );
+                                            }
+                                          },
+                                          child: Text(
+                                            endTime.format(modalContext),
+                                            style: const TextStyle(
+                                              color: Colors.cyanAccent,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                                DropdownButtonFormField<String>(
+                                  value: repeat,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Repeat',
+                                    labelStyle: TextStyle(
+                                      color: Colors.white70,
                                     ),
                                   ),
-                                ],
-                              ),
+                                  dropdownColor: const Color.fromRGBO(
+                                    30,
+                                    30,
+                                    30,
+                                    1,
+                                  ),
+                                  style: const TextStyle(color: Colors.white),
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: 'none',
+                                      child: Text('Does not repeat'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 'daily',
+                                      child: Text('Every day'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 'weekly',
+                                      child: Text('Every week'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 'monthly',
+                                      child: Text('Every month'),
+                                    ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setModalState(() => repeat = v ?? 'none'),
+                                  onSaved: (v) => repeat = v ?? 'none',
+                                ),
+                                const SizedBox(height: 24),
+                                ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.cyanAccent,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 16,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                  ),
+                                  onPressed: () async {
+                                    if (!(formKey.currentState?.validate() ??
+                                        false)) {
+                                      return;
+                                    }
+                                    formKey.currentState?.save();
+
+                                    final startDT = DateTime(
+                                      _selectedDay!.year,
+                                      _selectedDay!.month,
+                                      _selectedDay!.day,
+                                      startTime.hour,
+                                      startTime.minute,
+                                    );
+                                    final endDT = DateTime(
+                                      _selectedDay!.year,
+                                      _selectedDay!.month,
+                                      _selectedDay!.day,
+                                      endTime.hour,
+                                      endTime.minute,
+                                    );
+
+                                    try {
+                                      await SupabaseService.instance
+                                          .createEvent(
+                                            groupId: selectedGroupId,
+                                            title: title!,
+                                            description: description,
+                                            startTime: startDT,
+                                            endTime: endDT,
+                                            repeat: repeat == 'none'
+                                                ? ''
+                                                : repeat,
+                                          );
+                                      if (!mounted) return;
+                                      Navigator.of(modalContext).pop();
+                                      await _loadEvents();
+                                      if (!mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Event saved'),
+                                          backgroundColor: Colors.green,
+                                        ),
+                                      );
+                                    } catch (e) {
+                                      if (!mounted) return;
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'Error saving event: $e',
+                                          ),
+                                          backgroundColor: Colors.red,
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  child: const Text(
+                                    'Save Event',
+                                    style: TextStyle(color: Colors.black),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -632,8 +709,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
     final groups = await SupabaseService.instance.fetchEventGroups();
     if (!mounted) return;
 
-    final String? eventId = event['id']?.toString();
-    if (eventId == null || eventId.isEmpty) {
+    final String? rawEventId = event['id']?.toString();
+    if (rawEventId == null || rawEventId.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -644,6 +721,14 @@ class _TimetableScreenState extends State<TimetableScreen> {
       }
       return;
     }
+
+    // Block editing of synthetic recurring-instance ids (those with _r suffix)
+    if (_isSyntheticOccurrenceId(rawEventId)) {
+      _showCannotEditOccurrenceSnack();
+      return;
+    }
+
+    final String eventId = rawEventId;
 
     final formKey = GlobalKey<FormState>();
     String title = event['title'] ?? '';
@@ -666,172 +751,67 @@ class _TimetableScreenState extends State<TimetableScreen> {
               padding: EdgeInsets.only(
                 bottom: MediaQuery.of(modalContext).viewInsets.bottom,
               ),
-              child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(20),
-                ),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    height: MediaQuery.of(context).size.height * 0.75,
-                    color: Colors.black.withOpacity(0.7),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Column(
-                      children: [
-                        _buildDragHandle(),
-                        Expanded(
-                          child: Form(
-                            key: formKey,
-                            child: SingleChildScrollView(
-                              padding: const EdgeInsets.only(bottom: 24),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  const Text(
-                                    'Edit Event',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: Colors.cyanAccent,
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.bold,
+              child: GlassContainer(
+                borderRadius: 20.0,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: SizedBox(
+                  height: MediaQuery.of(context).size.height * 0.75,
+                  child: Column(
+                    children: [
+                      _buildDragHandle(),
+                      Expanded(
+                        child: Form(
+                          key: formKey,
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.only(bottom: 24),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                const Text(
+                                  'Edit Event',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.cyanAccent,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                TextFormField(
+                                  initialValue: title,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Title',
+                                    labelStyle: TextStyle(
+                                      color: Colors.white70,
                                     ),
                                   ),
-                                  const SizedBox(height: 12),
-                                  TextFormField(
-                                    initialValue: title,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Title',
-                                      labelStyle: TextStyle(
-                                        color: Colors.white70,
-                                      ),
+                                  style: const TextStyle(color: Colors.white),
+                                  validator: (v) => (v == null || v.isEmpty)
+                                      ? 'Enter a title'
+                                      : null,
+                                  onSaved: (v) => title = v ?? '',
+                                ),
+                                const SizedBox(height: 12),
+                                TextFormField(
+                                  initialValue: description,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Description (optional)',
+                                    labelStyle: TextStyle(
+                                      color: Colors.white70,
                                     ),
-                                    style: const TextStyle(color: Colors.white),
-                                    validator: (v) => (v == null || v.isEmpty)
-                                        ? 'Enter a title'
-                                        : null,
-                                    onSaved: (v) => title = v ?? '',
                                   ),
-                                  const SizedBox(height: 12),
-                                  TextFormField(
-                                    initialValue: description,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Description (optional)',
-                                      labelStyle: TextStyle(
-                                        color: Colors.white70,
-                                      ),
-                                    ),
-                                    style: const TextStyle(color: Colors.white),
-                                    maxLines: 2,
-                                    onSaved: (v) => description = v,
-                                  ),
-                                  const SizedBox(height: 12),
-                                  if (groups.isNotEmpty)
-                                    DropdownButtonFormField<String>(
-                                      value: selectedGroupId,
-                                      hint: const Text(
-                                        'Assign to a group (optional)',
-                                        style: TextStyle(color: Colors.white70),
-                                      ),
-                                      dropdownColor: const Color.fromRGBO(
-                                        30,
-                                        30,
-                                        30,
-                                        1,
-                                      ),
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                      ),
-                                      items: groups
-                                          .map(
-                                            (group) => DropdownMenuItem(
-                                              value: group['id'] as String,
-                                              child: Text(
-                                                group['group_name'] as String,
-                                              ),
-                                            ),
-                                          )
-                                          .toList(),
-                                      onChanged: (v) => setModalState(
-                                        () => selectedGroupId = v,
-                                      ),
-                                      onSaved: (v) => selectedGroupId = v,
-                                    ),
-                                  const SizedBox(height: 12),
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          const Text(
-                                            'Starts at:',
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          TextButton(
-                                            onPressed: () async {
-                                              final picked =
-                                                  await showTimePicker(
-                                                    context: modalContext,
-                                                    initialTime: startTime,
-                                                  );
-                                              if (picked != null)
-                                                setModalState(
-                                                  () => startTime = picked,
-                                                );
-                                            },
-                                            child: Text(
-                                              startTime.format(modalContext),
-                                              style: const TextStyle(
-                                                color: Colors.cyanAccent,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      Row(
-                                        children: [
-                                          const Text(
-                                            'Ends at:',
-                                            style: TextStyle(
-                                              color: Colors.white70,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          TextButton(
-                                            onPressed: () async {
-                                              final picked =
-                                                  await showTimePicker(
-                                                    context: modalContext,
-                                                    initialTime: endTime,
-                                                  );
-                                              if (picked != null)
-                                                setModalState(
-                                                  () => endTime = picked,
-                                                );
-                                            },
-                                            child: Text(
-                                              endTime.format(modalContext),
-                                              style: const TextStyle(
-                                                color: Colors.cyanAccent,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 12),
+                                  style: const TextStyle(color: Colors.white),
+                                  maxLines: 2,
+                                  onSaved: (v) => description = v,
+                                ),
+                                const SizedBox(height: 12),
+                                if (groups.isNotEmpty)
                                   DropdownButtonFormField<String>(
-                                    value: repeat,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Repeat',
-                                      labelStyle: TextStyle(
-                                        color: Colors.white70,
-                                      ),
+                                    value: selectedGroupId,
+                                    hint: const Text(
+                                      'Assign to a group (optional)',
+                                      style: TextStyle(color: Colors.white70),
                                     ),
                                     dropdownColor: const Color.fromRGBO(
                                       30,
@@ -840,212 +820,301 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                       1,
                                     ),
                                     style: const TextStyle(color: Colors.white),
-                                    items: const [
-                                      DropdownMenuItem(
-                                        value: 'none',
-                                        child: Text('Does not repeat'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'daily',
-                                        child: Text('Every day'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'weekly',
-                                        child: Text('Every week'),
-                                      ),
-                                      DropdownMenuItem(
-                                        value: 'monthly',
-                                        child: Text('Every month'),
-                                      ),
-                                    ],
+                                    items: groups
+                                        .map(
+                                          (group) => DropdownMenuItem(
+                                            value: group['id'] as String,
+                                            child: Text(
+                                              group['group_name'] as String,
+                                            ),
+                                          ),
+                                        )
+                                        .toList(),
                                     onChanged: (v) => setModalState(
-                                      () => repeat = v ?? 'none',
+                                      () => selectedGroupId = v,
                                     ),
-                                    onSaved: (v) => repeat = v ?? 'none',
+                                    onSaved: (v) => selectedGroupId = v,
                                   ),
-                                  const SizedBox(height: 24),
-                                  Row(
-                                    children: [
-                                      IconButton(
-                                        icon: const Icon(
-                                          Icons.delete,
-                                          color: Colors.redAccent,
+                                const SizedBox(height: 12),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        const Text(
+                                          'Starts at:',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                          ),
                                         ),
-                                        onPressed: () async {
-                                          final confirm = await showDialog<bool>(
-                                            context: modalContext,
-                                            builder: (dialogCtx) => AlertDialog(
-                                              backgroundColor:
-                                                  const Color.fromRGBO(
-                                                    30,
-                                                    30,
-                                                    30,
-                                                    0.9,
-                                                  ),
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius:
-                                                    BorderRadius.circular(16),
-                                              ),
-                                              title: const Text(
-                                                'Confirm Deletion',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                ),
-                                              ),
-                                              content: const Text(
-                                                'Are you sure you want to delete this event?',
-                                                style: TextStyle(
-                                                  color: Colors.white70,
-                                                ),
-                                              ),
-                                              actions: [
-                                                TextButton(
-                                                  onPressed: () => Navigator.of(
-                                                    dialogCtx,
-                                                  ).pop(false),
-                                                  child: const Text('Cancel'),
-                                                ),
-                                                TextButton(
-                                                  onPressed: () => Navigator.of(
-                                                    dialogCtx,
-                                                  ).pop(true),
-                                                  child: const Text(
-                                                    'Delete',
-                                                    style: TextStyle(
-                                                      color: Colors.red,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
+                                        const SizedBox(width: 12),
+                                        TextButton(
+                                          onPressed: () async {
+                                            final picked = await showTimePicker(
+                                              context: modalContext,
+                                              initialTime: startTime,
+                                            );
+                                            if (picked != null)
+                                              setModalState(
+                                                () => startTime = picked,
+                                              );
+                                          },
+                                          child: Text(
+                                            startTime.format(modalContext),
+                                            style: const TextStyle(
+                                              color: Colors.cyanAccent,
                                             ),
-                                          );
-
-                                          if (confirm == true) {
-                                            try {
-                                              await SupabaseService.instance
-                                                  .deleteEvent(eventId);
-                                              if (!mounted) return;
-                                              Navigator.of(modalContext).pop();
-                                              await _loadEvents();
-                                              if (!mounted) return;
-                                              ScaffoldMessenger.of(
-                                                context,
-                                              ).showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Event deleted',
-                                                  ),
-                                                  backgroundColor: Colors.green,
-                                                ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    Row(
+                                      children: [
+                                        const Text(
+                                          'Ends at:',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        TextButton(
+                                          onPressed: () async {
+                                            final picked = await showTimePicker(
+                                              context: modalContext,
+                                              initialTime: endTime,
+                                            );
+                                            if (picked != null)
+                                              setModalState(
+                                                () => endTime = picked,
                                               );
-                                            } catch (e) {
-                                              if (!mounted) return;
-                                              ScaffoldMessenger.of(
-                                                context,
-                                              ).showSnackBar(
-                                                SnackBar(
-                                                  content: Text(
-                                                    'Error deleting: $e',
-                                                  ),
-                                                  backgroundColor: Colors.red,
-                                                ),
-                                              );
-                                            }
-                                          }
-                                        },
+                                          },
+                                          child: Text(
+                                            endTime.format(modalContext),
+                                            style: const TextStyle(
+                                              color: Colors.cyanAccent,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                                DropdownButtonFormField<String>(
+                                  value: repeat,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Repeat',
+                                    labelStyle: TextStyle(
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                  dropdownColor: const Color.fromRGBO(
+                                    30,
+                                    30,
+                                    30,
+                                    1,
+                                  ),
+                                  style: const TextStyle(color: Colors.white),
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: 'none',
+                                      child: Text('Does not repeat'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 'daily',
+                                      child: Text('Every day'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 'weekly',
+                                      child: Text('Every week'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 'monthly',
+                                      child: Text('Every month'),
+                                    ),
+                                  ],
+                                  onChanged: (v) =>
+                                      setModalState(() => repeat = v ?? 'none'),
+                                  onSaved: (v) => repeat = v ?? 'none',
+                                ),
+                                const SizedBox(height: 24),
+                                Row(
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(
+                                        Icons.delete,
+                                        color: Colors.redAccent,
                                       ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: ElevatedButton(
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Colors.cyanAccent,
-                                            padding: const EdgeInsets.symmetric(
-                                              vertical: 16,
-                                            ),
+                                      onPressed: () async {
+                                        final confirm = await showDialog<bool>(
+                                          context: modalContext,
+                                          builder: (dialogCtx) => AlertDialog(
+                                            backgroundColor:
+                                                const Color.fromRGBO(
+                                                  30,
+                                                  30,
+                                                  30,
+                                                  0.9,
+                                                ),
                                             shape: RoundedRectangleBorder(
                                               borderRadius:
-                                                  BorderRadius.circular(12),
+                                                  BorderRadius.circular(16),
                                             ),
+                                            title: const Text(
+                                              'Confirm Deletion',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                            content: const Text(
+                                              'Are you sure you want to delete this event?',
+                                              style: TextStyle(
+                                                color: Colors.white70,
+                                              ),
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(
+                                                  dialogCtx,
+                                                ).pop(false),
+                                                child: const Text('Cancel'),
+                                              ),
+                                              TextButton(
+                                                onPressed: () => Navigator.of(
+                                                  dialogCtx,
+                                                ).pop(true),
+                                                child: const Text(
+                                                  'Delete',
+                                                  style: TextStyle(
+                                                    color: Colors.red,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                          onPressed: () async {
-                                            if (!(formKey.currentState
-                                                    ?.validate() ??
-                                                false)) {
-                                              return;
-                                            }
-                                            formKey.currentState?.save();
+                                        );
 
-                                            final startDT = DateTime(
-                                              _selectedDay!.year,
-                                              _selectedDay!.month,
-                                              _selectedDay!.day,
-                                              startTime.hour,
-                                              startTime.minute,
+                                        if (confirm == true) {
+                                          try {
+                                            await SupabaseService.instance
+                                                .deleteEvent(eventId);
+                                            if (!mounted) return;
+                                            Navigator.of(modalContext).pop();
+                                            await _loadEvents();
+                                            if (!mounted) return;
+                                            ScaffoldMessenger.of(
+                                              context,
+                                            ).showSnackBar(
+                                              const SnackBar(
+                                                content: Text('Event deleted'),
+                                                backgroundColor: Colors.green,
+                                              ),
                                             );
-                                            final endDT = DateTime(
-                                              _selectedDay!.year,
-                                              _selectedDay!.month,
-                                              _selectedDay!.day,
-                                              endTime.hour,
-                                              endTime.minute,
+                                          } catch (e) {
+                                            if (!mounted) return;
+                                            ScaffoldMessenger.of(
+                                              context,
+                                            ).showSnackBar(
+                                              SnackBar(
+                                                content: Text(
+                                                  'Error deleting: $e',
+                                                ),
+                                                backgroundColor: Colors.red,
+                                              ),
                                             );
-
-                                            try {
-                                              await SupabaseService.instance
-                                                  .updateEvent(
-                                                    eventId: eventId,
-                                                    title: title,
-                                                    description: description,
-                                                    groupId: selectedGroupId,
-                                                    startTime: startDT,
-                                                    endTime: endDT,
-                                                    repeat: repeat,
-                                                  );
-                                              if (!mounted) return;
-                                              Navigator.of(modalContext).pop();
-                                              await _loadEvents();
-                                              if (!mounted) return;
-                                              ScaffoldMessenger.of(
-                                                context,
-                                              ).showSnackBar(
-                                                const SnackBar(
-                                                  content: Text(
-                                                    'Event updated',
-                                                  ),
-                                                  backgroundColor: Colors.green,
-                                                ),
-                                              );
-                                            } catch (e) {
-                                              if (!mounted) return;
-                                              ScaffoldMessenger.of(
-                                                context,
-                                              ).showSnackBar(
-                                                SnackBar(
-                                                  content: Text(
-                                                    'Error updating: $e',
-                                                  ),
-                                                  backgroundColor: Colors.red,
-                                                ),
-                                              );
-                                            }
-                                          },
-                                          child: const Text(
-                                            'Save Changes',
-                                            style: TextStyle(
-                                              color: Colors.black,
+                                          }
+                                        }
+                                      },
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: ElevatedButton(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: Colors.cyanAccent,
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 16,
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              12,
                                             ),
                                           ),
                                         ),
+                                        onPressed: () async {
+                                          if (!(formKey.currentState
+                                                  ?.validate() ??
+                                              false)) {
+                                            return;
+                                          }
+                                          formKey.currentState?.save();
+
+                                          final startDT = DateTime(
+                                            _selectedDay!.year,
+                                            _selectedDay!.month,
+                                            _selectedDay!.day,
+                                            startTime.hour,
+                                            startTime.minute,
+                                          );
+                                          final endDT = DateTime(
+                                            _selectedDay!.year,
+                                            _selectedDay!.month,
+                                            _selectedDay!.day,
+                                            endTime.hour,
+                                            endTime.minute,
+                                          );
+
+                                          try {
+                                            await SupabaseService.instance
+                                                .updateEvent(
+                                                  eventId: eventId,
+                                                  title: title,
+                                                  description: description,
+                                                  groupId: selectedGroupId,
+                                                  startTime: startDT,
+                                                  endTime: endDT,
+                                                  repeat: repeat,
+                                                );
+                                            if (!mounted) return;
+                                            Navigator.of(modalContext).pop();
+                                            await _loadEvents();
+                                            if (!mounted) return;
+                                            ScaffoldMessenger.of(
+                                              context,
+                                            ).showSnackBar(
+                                              const SnackBar(
+                                                content: Text('Event updated'),
+                                                backgroundColor: Colors.green,
+                                              ),
+                                            );
+                                          } catch (e) {
+                                            if (!mounted) return;
+                                            ScaffoldMessenger.of(
+                                              context,
+                                            ).showSnackBar(
+                                              SnackBar(
+                                                content: Text(
+                                                  'Error updating: $e',
+                                                ),
+                                                backgroundColor: Colors.red,
+                                              ),
+                                            );
+                                          }
+                                        },
+                                        child: const Text(
+                                          'Save Changes',
+                                          style: TextStyle(color: Colors.black),
+                                        ),
                                       ),
-                                    ],
-                                  ),
-                                ],
-                              ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),
@@ -1072,187 +1141,369 @@ class _TimetableScreenState extends State<TimetableScreen> {
     String displayUsername = '';
     int totalAddons = 0;
     int plusAddons = 0;
+    int addedTimetablesCount = 0;
 
+    // initial fetches (before showing sheet)
     try {
       final uid = AuthService.instance.currentUser?.uid;
       if (uid != null) {
-        final profile = await SupabaseService.instance.fetchUserProfile(uid);
-        displayUsername =
-            profile['username'] as String? ??
-            profile['display_name'] as String? ??
-            '';
+        try {
+          final profile = await SupabaseService.instance.fetchUserProfile(uid);
+          displayUsername =
+              profile['username'] as String? ??
+              profile['display_name'] as String? ??
+              '';
+        } catch (e) {
+          debugPrint('[_openHamburger] fetch profile failed: $e');
+        }
+
         if (displayUsername.isNotEmpty) {
-          final stats = await SupabaseService.instance.fetchTimetableAddonStats(
-            displayUsername,
-          );
-          totalAddons = stats['total'] ?? 0;
-          plusAddons = stats['plus'] ?? 0;
+          try {
+            final stats = await SupabaseService.instance
+                .fetchTimetableAddonStats(displayUsername);
+            totalAddons = stats['total'] ?? 0;
+            plusAddons = stats['plus'] ?? 0;
+          } catch (e) {
+            debugPrint('[_openHamburger] fetch addon stats failed: $e');
+          }
+        }
+
+        try {
+          final myAdded = await SupabaseService.instance.getMySharedUsers();
+          addedTimetablesCount = myAdded.length;
+        } catch (_) {
+          addedTimetablesCount = 0;
         }
       }
     } catch (e) {
-      debugPrint('[_openHamburger] error fetching profile/stats: $e');
+      debugPrint('[_openHamburger] pre-sheet error: $e');
     }
 
-    final expectedCashOut = (plusAddons ~/ 100) * 1000;
+    try {
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (modalContext) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(modalContext).viewInsets.bottom,
+            ),
+            child: GlassContainer(
+              borderRadius: 20.0,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              child: Container(
+                // keep the DraggableScrollableSheet inside the glass container
+                child: DraggableScrollableSheet(
+                  initialChildSize: 0.6,
+                  minChildSize: 0.4,
+                  maxChildSize: 0.9,
+                  expand: false,
+                  builder: (context, scrollController) {
+                    return StatefulBuilder(
+                      builder: (context, setModalState) {
+                        bool subscribing = false;
 
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (modalContext) {
-        return ClipRRect(
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              color: Colors.black.withOpacity(0.7),
-              child: DraggableScrollableSheet(
-                initialChildSize: 0.6,
-                minChildSize: 0.4,
-                maxChildSize: 0.9,
-                expand: false,
-                builder: (context, scrollController) {
-                  return StatefulBuilder(
-                    builder: (context, setModalState) {
-                      bool subscribing = false;
+                        // compute expected cashout from the current plusAddons
+                        int expectedCashOutLocal() =>
+                            (plusAddons ~/ 100) * 1000;
 
-                      Future<void> doSubscribe(String usernameToAdd) async {
-                        if (usernameToAdd.isEmpty) return;
-                        if (!_isPremium && _addedTimetables.length >= 1) {
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Free users can only add one timetable. Upgrade to add more.',
-                                ),
-                                backgroundColor: Colors.orange,
-                              ),
-                            );
-                          }
-                          return;
-                        }
-                        setModalState(() => subscribing = true);
-                        try {
-                          await SupabaseService.instance.subscribeToTimetable(
-                            usernameToAdd,
-                          );
-                          await _loadSharedUsers();
-                          await _loadEvents();
-                          codeController.clear();
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Subscribed'),
-                                backgroundColor: Colors.green,
-                              ),
-                            );
-                          }
-                        } catch (e) {
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text('Subscribe failed: $e'),
-                                backgroundColor: Colors.red,
-                              ),
-                            );
-                          }
-                        } finally {
-                          if (mounted) {
-                            setModalState(() => subscribing = false);
+                        Future<void> refreshAddonStats() async {
+                          if (displayUsername.isEmpty) return;
+                          try {
+                            final stats = await SupabaseService.instance
+                                .fetchTimetableAddonStats(displayUsername);
+                            if (mounted) {
+                              setModalState(() {
+                                totalAddons = stats['total'] ?? 0;
+                                plusAddons = stats['plus'] ?? 0;
+                              });
+                            }
+                          } catch (e) {
+                            debugPrint('[refreshAddonStats] $e');
                           }
                         }
-                      }
 
-                      return ListView(
-                        controller: scrollController,
-                        padding: const EdgeInsets.all(16.0),
-                        children: [
-                          _buildDragHandle(),
-                          Row(
-                            children: [
-                              const CircleAvatar(
-                                radius: 28,
-                                backgroundColor: Colors.white12,
-                                child: Icon(
-                                  Icons.person,
-                                  color: Colors.white70,
+                        Future<void> doSubscribe(String usernameToAdd) async {
+                          final toAdd = usernameToAdd.trim();
+                          if (toAdd.isEmpty) return;
+
+                          if (!_isPremium && addedTimetablesCount >= 1) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Free users can only add one timetable. Upgrade to add more.',
+                                  ),
+                                  backgroundColor: Colors.orange,
                                 ),
+                              );
+                            }
+                            return;
+                          }
+
+                          setModalState(() => subscribing = true);
+                          try {
+                            await SupabaseService.instance.subscribeToTimetable(
+                              toAdd,
+                            );
+
+                            // refresh global lists
+                            await _loadSharedUsers();
+                            await _loadEvents();
+
+                            // refresh local added count and addon stats for the display user
+                            try {
+                              final myAdded = await SupabaseService.instance
+                                  .getMySharedUsers();
+                              if (mounted) {
+                                setModalState(() {
+                                  addedTimetablesCount = myAdded.length;
+                                });
+                              }
+                            } catch (_) {}
+
+                            // refresh the user's addon stats as well (so badges update)
+                            await refreshAddonStats();
+
+                            codeController.clear();
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Subscribed'),
+                                  backgroundColor: Colors.green,
+                                ),
+                              );
+                            }
+                          } catch (e) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Subscribe failed: $e'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                          } finally {
+                            if (mounted)
+                              setModalState(() => subscribing = false);
+                          }
+                        }
+
+                        return ListView(
+                          controller: scrollController,
+                          padding: const EdgeInsets.all(16.0),
+                          children: [
+                            _buildDragHandle(),
+                            Row(
+                              children: [
+                                const CircleAvatar(
+                                  radius: 28,
+                                  backgroundColor: Colors.white12,
+                                  child: Icon(
+                                    Icons.person,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        displayUsername.isNotEmpty
+                                            ? '@$displayUsername'
+                                            : 'No username',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 16,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white10,
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                const Icon(
+                                                  Icons.group,
+                                                  size: 14,
+                                                  color: Colors.white70,
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  '$totalAddons addons',
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white10,
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                const Icon(
+                                                  Icons.star,
+                                                  size: 14,
+                                                  color: Colors.amberAccent,
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  '$plusAddons plus • N${expectedCashOutLocal()}',
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white10,
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                const Icon(
+                                                  Icons.person_add,
+                                                  size: 14,
+                                                  color: Colors.white70,
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  'Added: $addedTimetablesCount',
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 24),
+
+                            // rest of the sheet (subscribe UI, manage groups, added timetables)
+                            const SizedBox(height: 24),
+                            Card(
+                              color: Colors.white.withOpacity(0.05),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
                               ),
-                              const SizedBox(width: 12),
-                              Expanded(
+                              child: Padding(
+                                padding: const EdgeInsets.all(12.0),
                                 child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
                                   children: [
-                                    Text(
-                                      displayUsername.isNotEmpty
-                                          ? '@$displayUsername'
-                                          : 'No username',
-                                      style: const TextStyle(
+                                    const Text(
+                                      'Add another timetable',
+                                      style: TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.bold,
-                                        fontSize: 16,
                                       ),
                                     ),
                                     const SizedBox(height: 6),
+                                    Text(
+                                      _isPremium
+                                          ? 'Premium users can add multiple timetables.'
+                                          : 'Free users: 1 added timetable allowed.',
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 10),
                                     Row(
                                       children: [
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 4,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white10,
-                                            borderRadius: BorderRadius.circular(
-                                              12,
+                                        Expanded(
+                                          child: TextField(
+                                            controller: codeController,
+                                            style: const TextStyle(
+                                              color: Colors.white,
                                             ),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              const Icon(
-                                                Icons.group,
-                                                size: 14,
-                                                color: Colors.white70,
+                                            decoration: const InputDecoration(
+                                              hintText:
+                                                  'Enter username (e.g. alice123)',
+                                              hintStyle: TextStyle(
+                                                color: Colors.white38,
                                               ),
-                                              const SizedBox(width: 6),
-                                              Text(
-                                                '$totalAddons addons',
-                                                style: const TextStyle(
-                                                  color: Colors.white70,
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                            ],
+                                              isDense: true,
+                                              border: OutlineInputBorder(),
+                                              contentPadding:
+                                                  EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                            ),
                                           ),
                                         ),
                                         const SizedBox(width: 8),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 4,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white10,
-                                            borderRadius: BorderRadius.circular(
-                                              12,
+                                        Material(
+                                          color: Colors.cyanAccent,
+                                          shape: const CircleBorder(),
+                                          child: InkWell(
+                                            customBorder: const CircleBorder(),
+                                            onTap: subscribing
+                                                ? null
+                                                : () => doSubscribe(
+                                                    codeController.text,
+                                                  ),
+                                            child: Padding(
+                                              padding: const EdgeInsets.all(
+                                                10.0,
+                                              ),
+                                              child: subscribing
+                                                  ? const SizedBox(
+                                                      width: 18,
+                                                      height: 18,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                            strokeWidth: 2,
+                                                            color: Colors.black,
+                                                          ),
+                                                    )
+                                                  : const Icon(
+                                                      Icons.add,
+                                                      color: Colors.black,
+                                                    ),
                                             ),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              const Icon(
-                                                Icons.star,
-                                                size: 14,
-                                                color: Colors.amberAccent,
-                                              ),
-                                              const SizedBox(width: 6),
-                                              Text(
-                                                '$plusAddons plus • N$expectedCashOut',
-                                                style: const TextStyle(
-                                                  color: Colors.white70,
-                                                  fontSize: 12,
-                                                ),
-                                              ),
-                                            ],
                                           ),
                                         ),
                                       ],
@@ -1260,177 +1511,99 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                   ],
                                 ),
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 24),
-                          Card(
-                            color: Colors.white.withOpacity(0.05),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
                             ),
-                            child: Padding(
-                              padding: const EdgeInsets.all(12.0),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  const Text(
-                                    'Add another timetable',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    _isPremium
-                                        ? 'Premium users can add multiple timetables.'
-                                        : 'Free users: 1 added timetable allowed.',
-                                    style: const TextStyle(
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    icon: const Icon(
+                                      Icons.group,
                                       color: Colors.white70,
-                                      fontSize: 12,
                                     ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: TextField(
-                                          controller: codeController,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                          ),
-                                          decoration: const InputDecoration(
-                                            hintText:
-                                                'Enter username (e.g. alice123)',
-                                            hintStyle: TextStyle(
-                                              color: Colors.white38,
+                                    label: const Text(
+                                      'Manage groups',
+                                      style: TextStyle(color: Colors.white),
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      side: const BorderSide(
+                                        color: Colors.white10,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 14,
+                                      ),
+                                    ),
+                                    onPressed: () {
+                                      Navigator.of(context).pop();
+                                      Navigator.of(context)
+                                          .push(
+                                            MaterialPageRoute(
+                                              builder: (c) =>
+                                                  const ManageGroupsScreen(),
                                             ),
-                                            isDense: true,
-                                            border: OutlineInputBorder(),
-                                            contentPadding:
-                                                EdgeInsets.symmetric(
-                                                  horizontal: 12,
-                                                  vertical: 10,
-                                                ),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Material(
-                                        color: Colors.cyanAccent,
-                                        shape: const CircleBorder(),
-                                        child: InkWell(
-                                          customBorder: const CircleBorder(),
-                                          onTap: subscribing
-                                              ? null
-                                              : () => doSubscribe(
-                                                  codeController.text.trim(),
-                                                ),
-                                          child: Padding(
-                                            padding: const EdgeInsets.all(10.0),
-                                            child: subscribing
-                                                ? const SizedBox(
-                                                    width: 18,
-                                                    height: 18,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                          strokeWidth: 2,
-                                                          color: Colors.black,
-                                                        ),
-                                                  )
-                                                : const Icon(
-                                                    Icons.add,
-                                                    color: Colors.black,
-                                                  ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
+                                          )
+                                          .then(
+                                            (_) async => await _loadEvents(),
+                                          );
+                                    },
                                   ),
-                                ],
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: OutlinedButton.icon(
+                                    icon: const Icon(
+                                      Icons.person_add,
+                                      color: Colors.white70,
+                                    ),
+                                    label: const Text(
+                                      'Added timetables',
+                                      style: TextStyle(color: Colors.white),
+                                    ),
+                                    style: OutlinedButton.styleFrom(
+                                      side: const BorderSide(
+                                        color: Colors.white10,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 14,
+                                      ),
+                                    ),
+                                    onPressed: () {
+                                      Navigator.of(context).pop();
+                                      _showAddedTimetables();
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 18),
+                            const Text(
+                              'Manage the timetables you’ve added above. Removing a timetable will stop its events from appearing.',
+                              style: TextStyle(
+                                color: Colors.white38,
+                                fontSize: 12,
                               ),
                             ),
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  icon: const Icon(
-                                    Icons.group,
-                                    color: Colors.white70,
-                                  ),
-                                  label: const Text(
-                                    'Manage groups',
-                                    style: TextStyle(color: Colors.white),
-                                  ),
-                                  style: OutlinedButton.styleFrom(
-                                    side: const BorderSide(
-                                      color: Colors.white10,
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 14,
-                                    ),
-                                  ),
-                                  onPressed: () {
-                                    Navigator.of(context).pop();
-                                    Navigator.of(context)
-                                        .push(
-                                          MaterialPageRoute(
-                                            builder: (c) =>
-                                                const ManageGroupsScreen(),
-                                          ),
-                                        )
-                                        .then((_) async => await _loadEvents());
-                                  },
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  icon: const Icon(
-                                    Icons.person_add,
-                                    color: Colors.white70,
-                                  ),
-                                  label: const Text(
-                                    'Added timetables',
-                                    style: TextStyle(color: Colors.white),
-                                  ),
-                                  style: OutlinedButton.styleFrom(
-                                    side: const BorderSide(
-                                      color: Colors.white10,
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 14,
-                                    ),
-                                  ),
-                                  onPressed: () {
-                                    Navigator.of(context).pop();
-                                    _showAddedTimetables();
-                                  },
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 18),
-                          const Text(
-                            'Manage the timetables you’ve added above. Removing a timetable will stop its events from appearing.',
-                            style: TextStyle(
-                              color: Colors.white38,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  );
-                },
+                          ],
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-        );
-      },
-    );
+          );
+        },
+      );
+    } finally {
+      // clean up and refresh
+      try {
+        codeController.dispose();
+      } catch (_) {}
+      try {
+        await _loadSharedUsers();
+        await _loadEvents();
+      } catch (_) {}
+    }
   }
 
   // --- Improved "Added Timetables" bottom sheet (replaces previous version) ---
@@ -1441,12 +1614,15 @@ class _TimetableScreenState extends State<TimetableScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
-        return ClipRRect(
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: GlassContainer(
+            borderRadius: 20.0,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             child: Container(
-              color: Colors.black.withOpacity(0.7),
+              color: Colors.transparent,
               child: StatefulBuilder(
                 builder: (context, setModal) {
                   bool isLoading = false;
@@ -1479,7 +1655,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   }
 
                   Future<void> removeShare(String ownerId) async {
-                    // ownerId is the ID of the timetable owner (what you used earlier as `id`)
+                    // ownerId is the ID of the timetable owner
                     try {
                       await SupabaseService.instance
                           .unsubscribeFromTimetableByOwner(ownerId);
@@ -1586,16 +1762,50 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                             color: Colors.white,
                                           ),
                                         ),
-                                        subtitle: Text(
-                                          '@$username',
-                                          style: const TextStyle(
-                                            color: Colors.white70,
-                                          ),
+                                        subtitle: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              '@$username',
+                                              style: const TextStyle(
+                                                color: Colors.white70,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Row(
+                                              children: [
+                                                if ((user['owner_total_addons'] ??
+                                                        0) >
+                                                    0)
+                                                  Padding(
+                                                    padding:
+                                                        const EdgeInsets.only(
+                                                          right: 8.0,
+                                                        ),
+                                                    child: Text(
+                                                      '${user['owner_total_addons']} addons',
+                                                      style: const TextStyle(
+                                                        color: Colors.white54,
+                                                        fontSize: 12,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                Text(
+                                                  '${user['owner_plus_addons'] ?? 0} plus',
+                                                  style: const TextStyle(
+                                                    color: Colors.amberAccent,
+                                                    fontSize: 12,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
                                         ),
+
                                         trailing: IconButton(
                                           tooltip: 'Remove timetable',
                                           onPressed: () async {
-                                            // Confirm using the same styling as your other delete dialogs
                                             final confirm = await showDialog<bool>(
                                               context: context,
                                               builder: (dctx) => AlertDialog(
@@ -1699,12 +1909,13 @@ class _TimetableScreenState extends State<TimetableScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-          child: Container(
-            color: Colors.black.withOpacity(0.7),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: GlassContainer(
+          borderRadius: 20.0,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.75,
             child: DraggableScrollableSheet(
               initialChildSize: 0.6,
               minChildSize: 0.3,
@@ -2008,6 +2219,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   ),
                 const SizedBox(height: 8),
                 // Inline list or fallback
+                // Inline list or fallback (REPLACE your existing Expanded block with this)
                 Expanded(
                   child: todaysEvents.isEmpty
                       ? const Center(
@@ -2025,19 +2237,21 @@ class _TimetableScreenState extends State<TimetableScreen> {
                               _parseToLocal(ev['start_time']),
                             );
 
-                            // owner (safe)
-                            final ownerRaw =
-                                ev['event_owner'] ?? ev['owner'] ?? ev['user'];
-                            Map<String, dynamic>? owner;
-                            if (ownerRaw is Map) {
-                              owner = Map<String, dynamic>.from(ownerRaw);
-                            } else {
-                              owner = null;
-                            }
-                            final ownerUsername = owner != null
-                                ? (owner['username'] as String?)
-                                : (ev['username'] as String?) ??
-                                      (ev['creator_username'] as String?);
+                            // owner: prefer the enriched owner_username / owner_avatar_url
+                            final ownerUsername =
+                                (ev['owner_username'] as String?) ??
+                                ((ev['event_owner'] is Map)
+                                    ? (ev['event_owner']['username'] as String?)
+                                    : null) ??
+                                (ev['username'] as String?) ??
+                                (ev['creator_username'] as String?);
+
+                            final ownerAvatar =
+                                (ev['owner_avatar_url'] as String?) ??
+                                ((ev['event_owner'] is Map)
+                                    ? (ev['event_owner']['avatar_url']
+                                          as String?)
+                                    : null);
 
                             // isMine (safe)
                             final evUserId = ev['user_id'] as String?;
@@ -2062,7 +2276,19 @@ class _TimetableScreenState extends State<TimetableScreen> {
                             return Card(
                               color: const Color.fromRGBO(255, 255, 255, 0.06),
                               margin: const EdgeInsets.only(bottom: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
                               child: ListTile(
+                                // Show owner avatar for events that are NOT mine (subscribed users)
+                                leading: (!isMine && ownerAvatar != null)
+                                    ? CircleAvatar(
+                                        backgroundImage: NetworkImage(
+                                          ownerAvatar,
+                                        ),
+                                        radius: 20,
+                                      )
+                                    : null,
                                 title: Text(
                                   ev['title'] ?? '',
                                   style: const TextStyle(
@@ -2094,12 +2320,13 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                           ),
                                         ),
                                       ),
+                                    // show "by @username" for non-owned events
                                     if (!isMine && ownerUsername != null)
                                       Padding(
                                         padding: const EdgeInsets.only(top: 6),
                                         child: Text(
                                           'by @$ownerUsername',
-                                          style: TextStyle(
+                                          style: const TextStyle(
                                             color: Colors.amberAccent,
                                             fontStyle: FontStyle.italic,
                                             fontSize: 12,

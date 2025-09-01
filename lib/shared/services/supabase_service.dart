@@ -317,6 +317,18 @@ class SupabaseService {
     return Map<String, dynamic>.from(row as Map);
   }
 
+  // Helper: returns base event id if this looks like a synthetic recurring-instance id
+  // e.g. "746033c4-..._r3" -> "746033c4-..."
+  String _baseEventId(String eventId) {
+    if (eventId.contains('_r')) {
+      return eventId.split('_r').first;
+    }
+    return eventId;
+  }
+
+  /// Update an event (server-side). Throws if:
+  ///  - caller tried to update a synthetic recurring occurrence id (contains "_r")
+  ///  - no row was updated (not found or no permission)
   Future<void> updateEvent({
     required String eventId,
     String? groupId,
@@ -324,22 +336,70 @@ class SupabaseService {
     String? description,
     required DateTime startTime,
     required DateTime endTime,
-    required String repeat, // <-- always required
+    required String repeat,
   }) async {
+    // Reject attempts to edit an expanded single occurrence (synthetic id).
+    if (eventId.contains('_r')) {
+      throw Exception(
+        'This appears to be a single instance of a recurring event and cannot be edited individually. '
+        'Open the original event to edit the series.',
+      );
+    }
+
+    final baseId = _baseEventId(eventId);
+
     final updates = <String, dynamic>{
       'group_id': groupId,
       'title': title,
       'description': description,
       'start_time': startTime.toIso8601String(),
       'end_time': endTime.toIso8601String(),
-      'repeat': repeat, // <-- always overwrite with current mode
+      'repeat': repeat,
     };
 
-    await supabase.from('events').update(updates).eq('id', eventId);
+    // Perform update and request the resulting rows so we can detect "no rows updated".
+    final res = await supabase
+        .from('events')
+        .update(updates)
+        .eq('id', baseId)
+        .select();
+
+    // If the update didn't return rows, nothing was updated (row not found or no permission)
+    // ignore: unnecessary_type_check, unnecessary_null_comparison
+    if (res == null || (res is List && res.isEmpty)) {
+      throw Exception(
+        'Event not found or you do not have permission to update it.',
+      );
+    }
   }
 
+  /// Delete an event. Throws if:
+  ///  - caller tried to delete a synthetic recurring occurrence id (contains "_r")
+  ///  - no row was deleted (not found or no permission)
   Future<void> deleteEvent(String eventId) async {
-    await supabase.from('events').delete().eq('id', eventId);
+    // Reject attempts to delete an expanded single occurrence (synthetic id).
+    if (eventId.contains('_r')) {
+      throw Exception(
+        'This appears to be a single instance of a recurring event and cannot be deleted individually. '
+        'Delete the original event to remove the series.',
+      );
+    }
+
+    final baseId = _baseEventId(eventId);
+
+    // Ask PostgREST to return deleted rows so we can confirm deletion happened
+    final res = await supabase
+        .from('events')
+        .delete()
+        .eq('id', baseId)
+        .select();
+
+    // ignore: unnecessary_type_check, unnecessary_null_comparison
+    if (res == null || (res is List && res.isEmpty)) {
+      throw Exception(
+        'Event not found or you do not have permission to delete it.',
+      );
+    }
   }
 
   /// Fetch timetable events for the currently-signed-in Firebase user.
@@ -499,17 +559,73 @@ class SupabaseService {
     final name = username.trim();
     if (name.isEmpty) return {'total': 0, 'plus': 0};
 
-    final res = await supabase.rpc(
-      'get_timetable_addon_stats',
-      params: {'p_username': name},
-    );
-    if (res == null) return {'total': 0, 'plus': 0};
+    try {
+      final res = await supabase.rpc(
+        'get_timetable_addon_stats',
+        params: {'p_username': name},
+      );
 
-    final map = Map<String, dynamic>.from((res as List).first as Map);
-    return {
-      'total': (map['total'] as int?) ?? 0,
-      'plus': (map['plus'] as int?) ?? 0,
-    };
+      if (res == null) return {'total': 0, 'plus': 0};
+
+      if (res is List && res.isNotEmpty) {
+        final row = res.first;
+        if (row is Map) {
+          final total = row['total'] is int
+              ? row['total'] as int
+              : int.tryParse(row['total']?.toString() ?? '') ?? 0;
+          final plus = row['plus'] is int
+              ? row['plus'] as int
+              : int.tryParse(row['plus']?.toString() ?? '') ?? 0;
+          return {'total': total, 'plus': plus};
+        }
+      }
+      return {'total': 0, 'plus': 0};
+    } catch (e) {
+      // RPC failed — fallback to client-side computation
+      debugPrint('fetchTimetableAddonStats RPC failed, falling back: $e');
+      try {
+        // 1) Find owner id (case-insensitive)
+        final ownerRow = await supabase
+            .from('users')
+            .select('id')
+            .ilike('username', name) // use ilike for case-insensitive match
+            .maybeSingle();
+
+        if (ownerRow == null || ownerRow['id'] == null) {
+          return {'total': 0, 'plus': 0};
+        }
+        final ownerId = ownerRow['id'] as String;
+
+        // 2) Fetch shares and owner info of the shared users
+        final rows = await supabase
+            .from('timetable_shares')
+            .select(
+              'shared_user_id, shared_user:users!shared_user_id(is_premium)',
+            )
+            .eq('owner_id', ownerId);
+
+        // ignore: unnecessary_null_comparison
+        if (rows == null) return {'total': 0, 'plus': 0};
+
+        int total = 0;
+        int plus = 0;
+        // ignore: unnecessary_type_check
+        if (rows is List) {
+          total = rows.length;
+          for (final r in rows) {
+            // ignore: unnecessary_type_check
+            if (r is Map) {
+              final su = r['shared_user'];
+              if (su is Map && (su['is_premium'] == true)) plus++;
+            }
+          }
+        }
+        return {'total': total, 'plus': plus};
+      } catch (e2) {
+        debugPrint('Client-side addon stats fallback failed: $e2');
+        return {'total': 0, 'plus': 0};
+      }
+    }
   }
 
   // ===========================================================================
