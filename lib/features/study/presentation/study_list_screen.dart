@@ -27,6 +27,7 @@ class _StudyListScreenState extends State<StudyListScreen>
     with WidgetsBindingObserver {
   String? _currentContextId;
   bool _showScrollToBottomButton = false;
+  bool _isDiagramMode = false;
 
   bool _isLoading = true;
   List<Map<String, dynamic>> _savedContexts = [];
@@ -419,8 +420,10 @@ class _StudyListScreenState extends State<StudyListScreen>
                       style: TextStyle(color: Colors.white),
                     ),
                     onTap: () {
+                      // --- BEHAVIOR IS CHANGED HERE ---
+                      // It now just enables diagram mode and closes the sheet.
+                      setState(() => _isDiagramMode = true);
                       Navigator.of(context).pop();
-                      _generateDiagram();
                     },
                   ),
                   ListTile(
@@ -539,134 +542,6 @@ class _StudyListScreenState extends State<StudyListScreen>
         ),
       ),
     );
-  }
-
-  /// Prompts user for text and sends it to the diagram generation endpoint.
-  /// Prompts user for text and sends it to the diagram generation endpoint.
-  Future<void> _generateDiagram() async {
-    final promptController = TextEditingController();
-
-    // --- FIX IS HERE ---
-    // We now use showGeneralDialog with your GlassContainer for a consistent theme.
-    final prompt = await showGeneralDialog<String>(
-      context: context,
-      barrierDismissible: true,
-      barrierLabel: 'Generate Diagram',
-      transitionDuration: const Duration(milliseconds: 200),
-      pageBuilder: (context, anim1, anim2) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: GlassContainer(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Text(
-                  'Generate a Diagram',
-                  style: TextStyle(
-                    color: Colors.cyanAccent,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: promptController,
-                  autofocus: true,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                    hintText: 'e.g., A flowchart of photosynthesis',
-                    hintStyle: TextStyle(color: Colors.white54),
-                    enabledBorder: UnderlineInputBorder(
-                      borderSide: BorderSide(color: Colors.white24),
-                    ),
-                    focusedBorder: UnderlineInputBorder(
-                      borderSide: BorderSide(color: Colors.cyanAccent),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text(
-                        'Cancel',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.cyanAccent,
-                      ),
-                      onPressed: () {
-                        if (promptController.text.trim().isNotEmpty) {
-                          Navigator.of(
-                            context,
-                          ).pop(promptController.text.trim());
-                        }
-                      },
-                      child: const Text(
-                        'Generate',
-                        style: TextStyle(color: Colors.black),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-
-    if (prompt == null || prompt.isEmpty) return;
-
-    setState(() {
-      _messages.add({'role': 'user', 'text': prompt, 'type': 'text'});
-      _messages.add({'role': 'assistant', 'text': '', 'type': 'typing'});
-    });
-    _scrollToBottom();
-
-    try {
-      final payload = {
-        'prompt': prompt,
-        // Add other relevant context if your image-proxy function needs it
-      };
-
-      final response = await Supabase.instance.client.functions.invoke(
-        'image-proxy',
-        body: payload,
-      );
-
-      if (response.status != 200) {
-        throw Exception(
-          response.data?['error'] ?? 'Failed to generate diagram.',
-        );
-      }
-
-      final imageUrl = response.data['response'] as String;
-
-      if (!mounted) return;
-      setState(() {
-        _messages.removeLast(); // Remove typing indicator
-        _messages.add({'role': 'assistant', 'text': imageUrl, 'type': 'image'});
-      });
-      _scrollToBottom();
-
-      if (_currentContextId != null) {
-        await SupabaseService.instance.saveCard(
-          contextId: _currentContextId!,
-          content: {'messages': _messages},
-        );
-      }
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _messages.removeLast());
-      _showGlassSnackBar('Diagram generation failed: $e', isError: true);
-    }
   }
 
   /// Handles the logic for saving a new card for the first time.
@@ -900,43 +775,54 @@ class _StudyListScreenState extends State<StudyListScreen>
 
   Future<void> _sendMessageHandler(String text) async {
     final promptText = text.trim();
-    if (promptText.isEmpty && _sessionAttachmentUrls.isEmpty) return;
+    if (promptText.isEmpty) {
+      _showGlassSnackBar('Please enter a message.', isError: true);
+      return;
+    }
 
+    final bool wasDiagramMode = _isDiagramMode;
     final attachmentsForThisMessage = List<String>.from(_sessionAttachmentUrls);
 
+    // Update the UI immediately
     setState(() {
       for (final url in attachmentsForThisMessage) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
       }
-      if (promptText.isNotEmpty) {
-        _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
-      }
+      _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
       _messages.add({'role': 'assistant', 'text': '', 'type': 'typing'});
-
       _msgCtrl.clear();
       _sessionAttachmentUrls.clear();
+      _isDiagramMode = false; // Always reset mode after sending
     });
     _scrollToBottom();
 
     try {
-      // --- FIX IS HERE ---
-      // We add 'context_rules' back into the payload to prevent the server error.
-      final payload = {
-        'prompt': promptText,
-        'chat_history': _messages.sublist(0, _messages.length - 1),
-        'attachments': {
-          'session': attachmentsForThisMessage,
-          'context': _permanentAttachmentUrls,
-        },
-        'context_rules': {
-          'title': _titleCtl.text.trim(),
-          'result_format': 'Summarize', // Use a sensible default
-          'more_context': '', // Use a sensible default
-        },
-      };
+      // Determine which function and payload to use
+      final String functionName = wasDiagramMode ? 'image-proxy' : 'text-proxy';
+      final String aiResponseType = wasDiagramMode ? 'image' : 'text';
 
+      final Map<String, dynamic> payload;
+
+      if (wasDiagramMode) {
+        // Payload for generating diagrams
+        payload = {'prompt': promptText};
+      } else {
+        // --- NEW, SIMPLER PAYLOAD FOR TEXT ---
+        // Matches the new Supabase function
+        payload = {
+          'prompt': promptText,
+          'chat_history': _messages.sublist(0, _messages.length - 1),
+          'attachments': {
+            'session': attachmentsForThisMessage,
+            'context': _permanentAttachmentUrls,
+          },
+          'title': _titleCtl.text.trim(),
+        };
+      }
+
+      // Call the function
       final response = await Supabase.instance.client.functions.invoke(
-        'text-proxy',
+        functionName,
         body: payload,
       );
 
@@ -950,11 +836,16 @@ class _StudyListScreenState extends State<StudyListScreen>
 
       if (!mounted) return;
       setState(() {
-        _messages.removeLast();
-        _messages.add({'role': 'assistant', 'text': aiText, 'type': 'text'});
+        _messages.removeLast(); // Remove typing indicator
+        _messages.add({
+          'role': 'assistant',
+          'text': aiText,
+          'type': aiResponseType,
+        });
       });
       _scrollToBottom();
 
+      // Auto-save if the card is already saved
       if (_currentContextId != null) {
         await SupabaseService.instance.saveCard(
           contextId: _currentContextId!,
@@ -976,9 +867,7 @@ class _StudyListScreenState extends State<StudyListScreen>
         automaticallyImplyLeading: false,
         backgroundColor: Colors.black,
         elevation: 0,
-        // --- FIX IS HERE ---
-        // This prevents the color from changing when you scroll.
-        scrolledUnderElevation: 0.0,
+        scrolledUnderElevation: 0.0, // Prevents color change on scroll
         title: const Text(
           'Study Section',
           style: TextStyle(fontWeight: FontWeight.w900, fontFamily: 'Roboto'),
@@ -992,7 +881,6 @@ class _StudyListScreenState extends State<StudyListScreen>
         ],
       ),
       body: Column(
-        // ... rest of the body is the same
         children: [
           _buildTitleBar(),
           Expanded(
@@ -1028,10 +916,7 @@ class _StudyListScreenState extends State<StudyListScreen>
                 if (_sessionAttachmentUrls.isNotEmpty)
                   Container(
                     height: 80,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 4,
-                    ),
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
                     child: ListView.separated(
                       scrollDirection: Axis.horizontal,
                       itemCount: _sessionAttachmentUrls.length,
@@ -1085,19 +970,43 @@ class _StudyListScreenState extends State<StudyListScreen>
                       filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
                       child: Container(
                         color: const Color.fromRGBO(255, 255, 255, 0.12),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
+                        padding: const EdgeInsets.only(
+                          left: 4,
+                          right: 4,
+                          top: 2,
+                          bottom: 2,
                         ),
                         child: Row(
                           children: [
-                            InkWell(
-                              onTap: _openCardActionsMenu,
-                              child: const Icon(
-                                Icons.add,
-                                color: Colors.cyanAccent,
+                            // Diagram mode now shows just an icon inside the text bar
+                            if (_isDiagramMode)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8.0),
+                                child: InkWell(
+                                  onTap: () =>
+                                      setState(() => _isDiagramMode = false),
+                                  child: const CircleAvatar(
+                                    radius: 14,
+                                    backgroundColor: Colors.cyanAccent,
+                                    child: Icon(
+                                      Icons.palette,
+                                      size: 16,
+                                      color: Colors.black,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            else
+                              InkWell(
+                                onTap: _openCardActionsMenu,
+                                child: const Padding(
+                                  padding: EdgeInsets.all(8.0),
+                                  child: Icon(
+                                    Icons.add,
+                                    color: Colors.cyanAccent,
+                                  ),
+                                ),
                               ),
-                            ),
                             const SizedBox(width: 8),
                             Expanded(
                               child: TextField(
