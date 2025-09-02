@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
@@ -47,11 +48,64 @@ class _StudyListScreenState extends State<StudyListScreen>
     // This prevents the card from resetting when you pick an image.
   }
 
+  // --- Paste these methods inside _StudyListScreenState ---
+  // 1) Helper: wait for Firebase user and set Supabase Authorization header
+  Future<String?> _waitForFirebaseUserAndSetSupabaseHeader({
+    int timeoutSeconds = 5,
+  }) async {
+    final deadline = DateTime.now().add(Duration(seconds: timeoutSeconds));
+    while (DateTime.now().isBefore(deadline)) {
+      final fbUser = AuthService.instance.currentUser;
+      if (fbUser != null) {
+        try {
+          final token = await fbUser.getIdToken();
+          Supabase.instance.client.headers.update(
+            'Authorization',
+            (value) => 'Bearer ${token ?? ''}',
+            ifAbsent: () => 'Bearer ${token ?? ''}',
+          );
+          // ignore: avoid_print
+          print(
+            '[Study] Firebase user found; supabase header set. uid=${fbUser.uid}',
+          );
+        } catch (e) {
+          // ignore: avoid_print
+          print('[Study] Error fetching token for user: $e');
+        }
+        return fbUser.uid;
+      }
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+    // timed out
+    // ignore: avoid_print
+    print('[Study] No Firebase user found within $timeoutSeconds seconds.');
+    return null;
+  }
+
+  // 2) initState replacement — wait for firebase user and then load or fall back
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _loadInitialData();
+
+    // Non-blocking: wait up to 5s for Firebase user and set the supabase header,
+    // then load data for that user, otherwise initialize empty state.
+    _waitForFirebaseUserAndSetSupabaseHeader(timeoutSeconds: 5).then((uid) {
+      if (uid != null) {
+        _loadInitialDataForUser(uid);
+      } else {
+        if (!mounted) return;
+        setState(() {
+          _savedContexts = [];
+          _userProfile = null;
+          _currentContextId = null;
+          _messages.clear();
+          _sessionAttachmentUrls.clear();
+          _permanentAttachmentUrls.clear();
+          _isLoading = false;
+        });
+      }
+    });
 
     // show/hide FAB when user scrolls
     _scroll.addListener(() {
@@ -65,94 +119,120 @@ class _StudyListScreenState extends State<StudyListScreen>
     });
   }
 
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _scroll.removeListener(() {});
-    _msgCtrl.dispose();
-    _scroll.dispose();
-    _titleCtl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _loadInitialData() async {
-    setState(() => _isLoading = true);
+  // 3) _loadInitialDataForUser: fetch contexts/profile for a given firebase uid
+  Future<void> _loadInitialDataForUser(String userId) async {
+    // Keep UI usable — only show full-screen loader for operations that must block.
     try {
-      final currentUser = Supabase.instance.client.auth.currentUser;
-      if (currentUser == null) {
-        print('loadInitialData: no authenticated user found');
-        throw Exception('User not authenticated');
-      }
-      final userId = currentUser.id;
+      // Concurrent fetch, with a short timeout so UI doesn't hang
+      final futures = Future.wait([
+        SupabaseService.instance.fetchContexts(),
+        SupabaseService.instance.fetchUserProfile(userId),
+      ]);
 
-      print('loadInitialData: fetching contexts and profile for user $userId');
-
-      // Fetch both in parallel, add a timeout to avoid indefinite waits
-      final results =
-          await Future.wait([
-            SupabaseService.instance.fetchContexts(),
-            SupabaseService.instance.fetchUserProfile(userId),
-          ]).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () {
-              throw Exception('fetchContexts/fetchUserProfile timed out (15s)');
-            },
-          );
-
-      if (!mounted) {
-        print('loadInitialData: widget unmounted before setting state');
+      List<dynamic> results;
+      try {
+        results = await futures.timeout(
+          const Duration(seconds: 5),
+          onTimeout: () =>
+              throw TimeoutException('Initial data fetch timed out (5s).'),
+        );
+      } on TimeoutException catch (te) {
+        // ignore: avoid_print
+        print('[Study] _loadInitialDataForUser timeout: $te');
+        if (!mounted) return;
+        setState(() {
+          _savedContexts = [];
+          _userProfile = null;
+          _currentContextId = null;
+          _messages.clear();
+          _sessionAttachmentUrls.clear();
+          _permanentAttachmentUrls.clear();
+          _isLoading = false;
+        });
+        _showGlassSnackBar(
+          'Error loading data: request timed out.',
+          isError: true,
+        );
         return;
       }
 
-      print('loadInitialData: fetch succeeded');
+      final fetchedContexts = (results[0] as List?) ?? <Map<String, dynamic>>[];
+      final fetchedProfile =
+          (results[1] as Map<String, dynamic>?) ?? <String, dynamic>{};
 
+      if (!mounted) return;
       setState(() {
-        _savedContexts = results[0] as List<Map<String, dynamic>>;
-        _userProfile = results[1] as Map<String, dynamic>;
+        _savedContexts = fetchedContexts.cast<Map<String, dynamic>>();
+        _userProfile = Map<String, dynamic>.from(fetchedProfile);
         _currentContextId = null;
         _messages.clear();
         _sessionAttachmentUrls.clear();
         _permanentAttachmentUrls.clear();
         _isLoading = false;
       });
+
+      // ignore: avoid_print
+      print(
+        '[Study] Loaded ${_savedContexts.length} saved contexts for firebase uid=$userId',
+      );
     } catch (e, st) {
-      print('loadInitialData error: $e\n$st');
-      _showGlassSnackBar('Error loading data: $e', isError: true);
-      if (mounted) setState(() => _isLoading = false);
+      // ignore: avoid_print
+      print('[Study] _loadInitialDataForUser error: $e\n$st');
+      if (!mounted) return;
+      setState(() {
+        _savedContexts = [];
+        _userProfile = null;
+        _currentContextId = null;
+        _messages.clear();
+        _sessionAttachmentUrls.clear();
+        _permanentAttachmentUrls.clear();
+        _isLoading = false;
+      });
+      _showGlassSnackBar('Error loading data: ${e.toString()}', isError: true);
     }
   }
 
   void _showGlassSnackBar(String message, {bool isError = false}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-        backgroundColor: Colors.transparent, // Make the wrapper transparent
-        elevation: 0, // Remove shadow
-        content: GlassContainer(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Row(
-            children: [
-              Icon(
-                isError ? Icons.error_outline : Icons.check_circle_outline,
-                color: isError ? Colors.redAccent : Colors.greenAccent,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  message,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w500,
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      try {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            behavior: SnackBarBehavior.floating,
+            margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            content: GlassContainer(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                children: [
+                  Icon(
+                    isError ? Icons.error_outline : Icons.check_circle_outline,
+                    color: isError ? Colors.redAccent : Colors.greenAccent,
                   ),
-                ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      message,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
-    );
+        );
+      } catch (e) {
+        // swallow any errors: we don't want snack errors to crash the app.
+        // ignore: avoid_print
+        print('[showGlassSnackBar] failed: $e');
+      }
+    });
   }
 
   void _openHamburgerMenu() {
@@ -439,7 +519,9 @@ class _StudyListScreenState extends State<StudyListScreen>
           }
         }
         // Refresh the contexts list
-        await _loadInitialData();
+        if (_userProfile != null && _userProfile!['id'] != null) {
+          await _loadInitialDataForUser(_userProfile!['id']);
+        }
       } catch (e) {
         _showGlassSnackBar('Error deleting card: $e', isError: true);
       } finally {
@@ -883,7 +965,7 @@ class _StudyListScreenState extends State<StudyListScreen>
     final bool wasDiagramMode = _isDiagramMode;
     final attachmentsForThisMessage = List<String>.from(_sessionAttachmentUrls);
 
-    // Update the UI immediately (add user items + typing indicator)
+    // Update UI right away
     setState(() {
       for (final url in attachmentsForThisMessage) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
@@ -892,28 +974,31 @@ class _StudyListScreenState extends State<StudyListScreen>
       _messages.add({'role': 'assistant', 'text': '', 'type': 'typing'});
       _msgCtrl.clear();
       _sessionAttachmentUrls.clear();
-      _isDiagramMode = false; // Always reset mode after sending
+      _isDiagramMode = false;
     });
     _scrollToBottom();
 
     try {
-      // Build trimmed history (exclude the "typing" indicator which is the last item)
-      final int historyLimit = 8;
-      List<Map<String, String>> rawHistory = [];
-      if (_messages.length >= 2) {
-        // Exclude the final typing indicator
-        rawHistory = List<Map<String, String>>.from(
-          _messages.sublist(0, _messages.length - 1),
-        );
-      }
-      final List<Map<String, String>> trimmedHistory =
-          rawHistory.length > historyLimit
-          ? rawHistory.sublist(rawHistory.length - historyLimit)
-          : rawHistory;
-
-      // Choose function and payload
       final String functionName = wasDiagramMode ? 'image-proxy' : 'text-proxy';
       final String aiResponseType = wasDiagramMode ? 'image' : 'text';
+
+      // Build a small, safe chat_history payload (no 'typing' and only last N)
+      List<Map<String, String>> chatHistoryPayload = _messages
+          .where((m) => (m['type'] ?? 'text') != 'typing')
+          .map(
+            (m) => {
+              'role': (m['role'] ?? 'user').toString(),
+              'text': (m['text'] ?? '').toString(),
+            },
+          )
+          .toList();
+
+      const int maxHistoryToSend = 8;
+      if (chatHistoryPayload.length > maxHistoryToSend) {
+        chatHistoryPayload = chatHistoryPayload.sublist(
+          chatHistoryPayload.length - maxHistoryToSend,
+        );
+      }
 
       final Map<String, dynamic> payload;
       if (wasDiagramMode) {
@@ -921,7 +1006,7 @@ class _StudyListScreenState extends State<StudyListScreen>
       } else {
         payload = {
           'prompt': promptText,
-          'chat_history': trimmedHistory,
+          'chat_history': chatHistoryPayload,
           'attachments': {
             'session': attachmentsForThisMessage,
             'context': _permanentAttachmentUrls,
@@ -930,39 +1015,37 @@ class _StudyListScreenState extends State<StudyListScreen>
         };
       }
 
-      print(
-        'sendMessage: invoking $functionName with prompt "${promptText}" and history length ${trimmedHistory.length}',
-      );
+      // Debug: print payload size
+      try {
+        final int payloadBytes = utf8.encode(jsonEncode(payload)).length;
+        // ignore: avoid_print
+        print('[AI] payload size: $payloadBytes bytes');
+      } catch (_) {}
 
-      // Invoke with timeout so UI won't hang indefinitely
-      final Future invokeFuture = Supabase.instance.client.functions.invoke(
-        functionName,
-        body: payload,
-      );
+      // Invoke function with a client-side timeout
+      final response = await Supabase.instance.client.functions
+          .invoke(functionName, body: payload)
+          .timeout(
+            const Duration(seconds: 20),
+            onTimeout: () => throw Exception(
+              'AI service timed out. Try again or shorten the conversation history.',
+            ),
+          );
 
-      final response = await invokeFuture.timeout(
-        const Duration(seconds: 20),
-        onTimeout: () => throw Exception(
-          'AI function timed out (20s). Try again or send less history.',
-        ),
-      );
-
-      // Response validation
       if (response.status != 200) {
         final errorData = response.data as Map<String, dynamic>?;
-        final errorMessage = errorData?['error'] ?? 'Unknown AI error';
+        final errorMessage =
+            errorData?['error'] ??
+            errorData?['message'] ??
+            'Unknown AI error (${response.status})';
         throw Exception(errorMessage);
       }
 
-      final aiText = response.data['response'] as String;
+      final aiText = (response.data['response'] ?? '') as String;
 
       if (!mounted) return;
-
       setState(() {
-        // Remove typing indicator if present
-        if (_messages.isNotEmpty && _messages.last['type'] == 'typing') {
-          _messages.removeLast();
-        }
+        _messages.removeLast(); // remove typing indicator
         _messages.add({
           'role': 'assistant',
           'text': aiText,
@@ -973,24 +1056,17 @@ class _StudyListScreenState extends State<StudyListScreen>
 
       // Auto-save if the card is already saved
       if (_currentContextId != null) {
-        try {
-          await SupabaseService.instance.saveCard(
-            contextId: _currentContextId!,
-            content: {'messages': _messages},
-          );
-        } catch (saveErr) {
-          print('sendMessage: auto-save failed: $saveErr');
-        }
+        await SupabaseService.instance.saveCard(
+          contextId: _currentContextId!,
+          content: {'messages': _messages},
+        );
       }
-    } catch (e, st) {
-      print('sendMessage error: $e\n$st');
+    } catch (e) {
       if (!mounted) return;
-      // Remove typing indicator if left behind
-      setState(() {
-        if (_messages.isNotEmpty && _messages.last['type'] == 'typing') {
-          _messages.removeLast();
-        }
-      });
+      // ensure typing indicator removed
+      if (_messages.isNotEmpty && (_messages.last['type'] == 'typing')) {
+        setState(() => _messages.removeLast());
+      }
       _showGlassSnackBar(e.toString(), isError: true);
     }
   }

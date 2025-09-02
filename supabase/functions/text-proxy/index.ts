@@ -1,4 +1,6 @@
-// index.ts
+// functions/text-proxy/index.ts
+// Deploy this as your Supabase Edge Function at: functions/text-proxy/index.ts
+
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { encodeBase64 } from 'https://deno.land/std@0.224.0/encoding/base64.ts';
 import { corsHeaders } from '../_shared/cors.ts';
@@ -7,10 +9,14 @@ const API_KEY = Deno.env.get('GEMINI_API_KEY');
 const MODEL = 'gemini-1.5-flash-latest';
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}`;
 
+// Small helper to perform a fetch with an AbortController and timeout
 function abortableFetch(url: string, opts: RequestInit = {}, timeoutMs = 5000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
-  const combined = { ...opts, signal: controller.signal };
+  const combined: RequestInit = {
+    ...opts,
+    signal: controller.signal,
+  };
   return fetch(url, combined).finally(() => clearTimeout(id));
 }
 
@@ -24,24 +30,22 @@ serve(async (req) => {
       throw new Error('GEMINI_API_KEY is not set in project secrets');
     }
 
-    const body = await req.json();
     const {
       prompt = '',
       chat_history = [],
       attachments = {},
       title = '',
-    } = body;
+    } = await req.json();
 
     if (!prompt && (!attachments.session || attachments.session.length === 0)) {
       throw new Error('Prompt or attachments must be provided.');
     }
 
-    // SERVER-SIDE TRIM: limit history to last N messages
+    // Server-side trim of history to keep payload small
     const MAX_HISTORY = 8;
     const trimmedHistory = (chat_history || []).slice(-MAX_HISTORY);
 
-    // Only use a simple system instruction on followups to keep request small
-    let systemInstructionText;
+    let systemInstructionText: string;
     if ((trimmedHistory || []).length === 0) {
       systemInstructionText = `You are an expert study assistant. Your primary goal is to help the user understand material. If a course title is provided, such as "${title}", tailor your expertise to that subject. Analyze all provided context, images, and the entire chat history to give the best possible answer.`;
     } else {
@@ -53,16 +57,16 @@ serve(async (req) => {
       parts: [{ text: msg.text }],
     }));
 
-    // Build the user message parts: prompt + only the NEW images for this message
+    // Build user message parts: the prompt plus only NEW session images
     const userMessageParts: any[] = [{ text: prompt }];
     const newImageUrls = attachments?.session || [];
 
     for (const url of newImageUrls) {
       try {
-        // use abortableFetch to avoid a single slow image blocking the function
+        // Use abortableFetch to avoid one slow image blocking everything
         const imageRes = await abortableFetch(url, { method: 'GET' }, 5000);
-        if (!imageRes.ok) {
-          console.warn(`Skipping image ${url} (status ${imageRes.status})`);
+        if (!imageRes || !imageRes.ok) {
+          console.warn(`Skipping image ${url} (status ${imageRes?.status})`);
           continue;
         }
         const mimeType = imageRes.headers.get('content-type')?.split(';')[0] || 'image/jpeg';
@@ -85,22 +89,35 @@ serve(async (req) => {
       ],
     };
 
-    // Guard: if request too large, return helpful error
+    // Guard: avoid sending gigantic payloads
     const serialized = JSON.stringify(requestBody);
-    const MAX_PAYLOAD = 600000; // ~600 KB; tune down if needed
+    const MAX_PAYLOAD = 600000; // ~600 KB
     if (serialized.length > MAX_PAYLOAD) {
-      return new Response(JSON.stringify({ error: 'Payload too large. Please send less history or smaller images.' }), {
+      return new Response(JSON.stringify({
+        error: 'Payload too large. Please send less history or smaller images.'
+      }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 400,
       });
     }
 
-    // Send to Gemini
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestBody),
-    });
+    // Send to Gemini with a server-side timeout using abortableFetch
+    let res: Response;
+    try {
+      res = await abortableFetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      }, 5000); // 5s server-side timeout for Gemini call
+    } catch (e) {
+      console.error('Gemini fetch failed/aborted:', e);
+      return new Response(JSON.stringify({
+        error: 'AI service timed out or failed. Please try again.'
+      }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 504,
+      });
+    }
 
     if (!res.ok) {
       const errorBody = await res.text();
