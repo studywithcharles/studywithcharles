@@ -2,12 +2,14 @@
 
 import 'dart:ui';
 import 'dart:async';
+import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:studywithcharles/shared/services/auth_service.dart';
 import 'package:studywithcharles/shared/services/supabase_service.dart';
 import 'manage_groups_screen.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:studywithcharles/shared/widgets/glass_container.dart';
 
 class TimetableScreen extends StatefulWidget {
@@ -28,8 +30,12 @@ class _TimetableScreenState extends State<TimetableScreen> {
   String? _currentUserId;
   List<Map<String, dynamic>> _notifications = [];
   int _unreadCount = 0;
+  // ignore: unused_field
   bool _notifLoading = false;
   Timer? _notifTimer;
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedAppSub;
+  StreamSubscription<String?>? _tokenRefreshSub;
 
   @override
   void initState() {
@@ -41,7 +47,10 @@ class _TimetableScreenState extends State<TimetableScreen> {
     );
     _currentUserId = AuthService.instance.currentUser?.uid;
     _initAll();
-    _initNotifications();
+    _initNotifications(); // keeps current polling for in-app notification list/unread count
+    // Register for push and save device token (will only run if firebase_messaging is configured)
+    // We do this after _initNotifications so UI lists load immediately.
+    _registerForPush();
   }
 
   // Helper: returns true if the id looks like a synthetic expanded occurrence (e.g. "<uuid>_r3")
@@ -75,6 +84,16 @@ class _TimetableScreenState extends State<TimetableScreen> {
   void dispose() {
     try {
       _notifTimer?.cancel();
+    } catch (_) {}
+    // cancel firebase messaging subscriptions if set
+    try {
+      _onMessageSub?.cancel();
+    } catch (_) {}
+    try {
+      _onMessageOpenedAppSub?.cancel();
+    } catch (_) {}
+    try {
+      _tokenRefreshSub?.cancel();
     } catch (_) {}
     super.dispose();
   }
@@ -148,19 +167,164 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   Future<void> _initNotifications() async {
-    // initial fetch of both list & unread count
+    // Initial fetch of both list & unread count
     await _fetchNotificationsAndCount();
 
     // Periodic refresh: every 10 seconds (simple and reliable).
-    // You can increase the interval if you want less frequent polling.
     _notifTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
       try {
         await _fetchUnreadCount();
       } catch (_) {}
     });
 
-    // OPTIONAL: register device token for push (uncomment if using firebase_messaging)
-    // await _registerForPush();
+    // Listen for messages that arrive while app is in foreground
+    _onMessageSub = FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      try {
+        _fetchNotificationsAndCount().catchError((e) {
+          debugPrint('[notif] refresh after onMessage failed: $e');
+        });
+
+        // Extract payload
+        final actor = message.data['actor_username'] ?? 'Someone';
+        final action = message.data['action'] ?? 'updated an event';
+        final eventTitle = message.data['title'] ?? 'an event';
+        final startRaw = message.data['start_time'];
+
+        String whenText = '';
+        if (startRaw != null) {
+          try {
+            final dt = DateTime.parse(startRaw).toLocal();
+            whenText = ' — ${DateFormat.yMMMd().add_jm().format(dt)}';
+          } catch (_) {}
+        }
+
+        final title = '@$actor $action';
+        final body = '$eventTitle$whenText';
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('$title\n$body'),
+              duration: const Duration(seconds: 4),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      } catch (e) {
+        debugPrint('[notif] onMessage handler error: $e');
+      }
+    });
+
+    // Handle when a user taps a notification and the app is brought to foreground
+    _onMessageOpenedAppSub = FirebaseMessaging.onMessageOpenedApp.listen((
+      RemoteMessage message,
+    ) {
+      try {
+        final data = message.data;
+        final startRaw = data['start_time'];
+        if (startRaw != null) {
+          final startDate = DateTime.tryParse(startRaw)?.toLocal();
+          if (startDate != null && mounted) {
+            setState(() {
+              _selectedDay = DateTime(
+                startDate.year,
+                startDate.month,
+                startDate.day,
+              );
+              _focusedDay = _selectedDay!;
+            });
+            _loadEvents().catchError((_) {});
+            return;
+          }
+        }
+        // fallback
+        _fetchNotificationsAndCount().catchError((_) {});
+      } catch (e) {
+        debugPrint('[notif] onMessageOpenedApp handler error: $e');
+      }
+    });
+
+    // Handle if the app was opened from a terminated state via a notification
+    FirebaseMessaging.instance
+        .getInitialMessage()
+        .then((message) {
+          if (message != null) {
+            final data = message.data;
+            final startRaw = data['start_time'];
+            if (startRaw != null) {
+              final startDate = DateTime.tryParse(startRaw)?.toLocal();
+              if (startDate != null && mounted) {
+                setState(() {
+                  _selectedDay = DateTime(
+                    startDate.year,
+                    startDate.month,
+                    startDate.day,
+                  );
+                  _focusedDay = _selectedDay!;
+                });
+                _loadEvents().catchError((_) {});
+                return;
+              }
+            }
+            _fetchNotificationsAndCount().catchError((_) {});
+          }
+        })
+        .catchError((e) {
+          debugPrint('[notif] getInitialMessage failed: $e');
+        });
+
+    // NOTE: registerForPush flow (token handling + permission) remains separate.
+  }
+
+  Future<void> _registerForPush() async {
+    try {
+      final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        // not signed in — no token saved
+        return;
+      }
+
+      final FirebaseMessaging messaging = FirebaseMessaging.instance;
+
+      // Request permission (iOS) — safe to call on Android as well
+      final NotificationSettings settings = await messaging.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+        provisional: false,
+      );
+
+      if (settings.authorizationStatus == AuthorizationStatus.denied) {
+        debugPrint('[push] permission denied');
+        return;
+      }
+
+      // Get the current token for this device
+      final String? token = await messaging.getToken();
+      if (token != null && token.isNotEmpty) {
+        try {
+          await SupabaseService.instance.saveDeviceToken(token);
+          debugPrint('[push] token saved');
+        } catch (e) {
+          debugPrint('[push] saveDeviceToken failed: $e');
+        }
+      }
+
+      // Listen for token refreshes and update DB when they occur
+      _tokenRefreshSub = messaging.onTokenRefresh.listen((newToken) async {
+        // ignore: unnecessary_null_comparison
+        if (newToken != null && newToken.isNotEmpty) {
+          try {
+            await SupabaseService.instance.saveDeviceToken(newToken);
+            debugPrint('[push] token refreshed & saved');
+          } catch (e) {
+            debugPrint('[push] token refresh save failed: $e');
+          }
+        }
+      });
+    } catch (e) {
+      debugPrint('[push] _registerForPush failed: $e');
+    }
   }
 
   Future<void> _fetchNotificationsAndCount() async {
@@ -223,29 +387,6 @@ class _TimetableScreenState extends State<TimetableScreen> {
     }
   }
 
-  // OPTIONAL: register for FCM and save token to users.fcm_tokens via SupabaseService.saveDeviceToken
-  // Uncomment when you add firebase_messaging and configure Android/iOS as required by Firebase.
-  /*
-  Future<void> _registerForPush() async {
-    try {
-      final messaging = FirebaseMessaging.instance;
-      NotificationSettings settings = await messaging.requestPermission(
-        alert: true, badge: true, sound: true,
-      );
-      if (settings.authorizationStatus == AuthorizationStatus.authorized ||
-          settings.authorizationStatus == AuthorizationStatus.provisional) {
-        final token = await messaging.getToken();
-        if (token != null) {
-          await SupabaseService.instance.saveDeviceToken(token);
-          debugPrint('FCM token saved: $token');
-        }
-      }
-    } catch (e) {
-      debugPrint('[push] register failed: $e');
-    }
-  }
-  */
-
   // ---------- Notifications modal ----------
   Future<void> _openNotificationsModal() async {
     // Ensure latest notifications are loaded before opening
@@ -283,7 +424,14 @@ class _TimetableScreenState extends State<TimetableScreen> {
                           ),
                         ),
                         TextButton(
-                          onPressed: _markAllNotificationsRead,
+                          onPressed: () async {
+                            await _markAllNotificationsRead();
+                            setState(() {
+                              for (final n in _notifications) {
+                                n['read'] = true;
+                              }
+                            });
+                          },
                           child: const Text('Mark all read'),
                         ),
                       ],
@@ -291,9 +439,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   ),
                   const Divider(color: Colors.white24, height: 1),
                   Expanded(
-                    child: _notifLoading
-                        ? const Center(child: CircularProgressIndicator())
-                        : _notifications.isEmpty
+                    child: _notifications.isEmpty
                         ? const Center(
                             child: Text(
                               'No notifications',
@@ -318,15 +464,35 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                   : null;
                               final read = (n['read'] == true);
 
+                              // --- NEW: extract payload details
+                              final payload = n['payload'];
+                              String? eventTitle;
+                              String? eventWhen;
+                              if (payload != null && payload is Map) {
+                                eventTitle = payload['title'] as String?;
+                                final startRaw = payload['start_time'];
+                                if (startRaw != null) {
+                                  try {
+                                    final dt = DateTime.parse(
+                                      startRaw,
+                                    ).toLocal();
+                                    eventWhen = DateFormat.yMMMd()
+                                        .add_jm()
+                                        .format(dt);
+                                  } catch (_) {}
+                                }
+                              }
+
                               String title = '@$actor ';
-                              if (action == 'created')
+                              if (action == 'created') {
                                 title += 'created an event';
-                              else if (action == 'updated')
+                              } else if (action == 'updated') {
                                 title += 'updated an event';
-                              else if (action == 'deleted')
+                              } else if (action == 'deleted') {
                                 title += 'deleted an event';
-                              else
+                              } else {
                                 title += action;
+                              }
 
                               return ListTile(
                                 leading: avatar != null
@@ -345,17 +511,35 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                         : FontWeight.bold,
                                   ),
                                 ),
-                                subtitle: created != null
-                                    ? Text(
-                                        DateFormat.yMMMd().add_jm().format(
-                                          created,
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (eventTitle != null)
+                                      Text(
+                                        eventTitle,
+                                        style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 13,
                                         ),
+                                      ),
+                                    if (eventWhen != null)
+                                      Text(
+                                        eventWhen,
                                         style: const TextStyle(
                                           color: Colors.white54,
                                           fontSize: 12,
                                         ),
-                                      )
-                                    : null,
+                                      ),
+                                    if (created != null)
+                                      Text(
+                                        'Notified: ${DateFormat.yMMMd().add_jm().format(created)}',
+                                        style: const TextStyle(
+                                          color: Colors.white38,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                  ],
+                                ),
                                 trailing: read
                                     ? null
                                     : IconButton(
@@ -363,17 +547,24 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                           Icons.mark_email_read,
                                           color: Colors.cyanAccent,
                                         ),
-                                        onPressed: () {
+                                        onPressed: () async {
                                           final id = n['id'] as int?;
-                                          if (id != null)
-                                            _markNotificationRead(id);
+                                          if (id != null) {
+                                            await _markNotificationRead(id);
+                                            setState(() {
+                                              n['read'] = true;
+                                            });
+                                          }
                                         },
                                       ),
                                 onTap: () async {
                                   final id = n['id'] as int?;
-                                  if (id != null)
+                                  if (id != null) {
                                     await _markNotificationRead(id);
-                                  // optionally navigate to the event or close modal
+                                    setState(() {
+                                      n['read'] = true;
+                                    });
+                                  }
                                   Navigator.of(context).pop();
                                 },
                               );

@@ -630,6 +630,7 @@ class SupabaseService {
   }
 
   /// Fetch latest notifications for current Firebase user
+  /// Fetch latest notifications for current Firebase user
   Future<List<Map<String, dynamic>>> fetchNotifications({
     int limit = 50,
   }) async {
@@ -638,14 +639,28 @@ class SupabaseService {
 
     final rows = await supabase
         .from('timetable_notifications')
-        .select()
+        .select(
+          'id, recipient_id, actor_id, actor_username, event_id, action, payload, created_at, read',
+        )
         .eq('recipient_id', user.uid)
         .order('created_at', ascending: false)
         .limit(limit);
 
     // ignore: unnecessary_null_comparison
     if (rows == null) return <Map<String, dynamic>>[];
-    return List<Map<String, dynamic>>.from(rows as List);
+
+    // Flatten payload JSON so UI can access `title` and `start_time` easily
+    final list = (rows as List).map((row) {
+      final map = Map<String, dynamic>.from(row as Map);
+      if (map['payload'] != null && map['payload'] is Map) {
+        final payload = Map<String, dynamic>.from(map['payload']);
+        map['title'] = payload['title'];
+        map['start_time'] = payload['start_time'];
+      }
+      return map;
+    }).toList();
+
+    return List<Map<String, dynamic>>.from(list);
   }
 
   /// Return how many unread notifications the current user has.
