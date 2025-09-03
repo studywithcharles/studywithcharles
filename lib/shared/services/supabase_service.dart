@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import 'package:uuid/uuid.dart';
 import 'dart:math'; // Needed for random colors
 import 'package:flutter/material.dart'; // Needed for Color class
@@ -626,6 +627,125 @@ class SupabaseService {
         return {'total': 0, 'plus': 0};
       }
     }
+  }
+
+  /// Fetch latest notifications for current Firebase user
+  Future<List<Map<String, dynamic>>> fetchNotifications({
+    int limit = 50,
+  }) async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return <Map<String, dynamic>>[];
+
+    final rows = await supabase
+        .from('timetable_notifications')
+        .select()
+        .eq('recipient_id', user.uid)
+        .order('created_at', ascending: false)
+        .limit(limit);
+
+    // ignore: unnecessary_null_comparison
+    if (rows == null) return <Map<String, dynamic>>[];
+    return List<Map<String, dynamic>>.from(rows as List);
+  }
+
+  /// Return how many unread notifications the current user has.
+  Future<int> fetchUnreadCount() async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return 0;
+
+    final rows = await supabase
+        .from('timetable_notifications')
+        .select('id')
+        .eq('recipient_id', user.uid)
+        .eq('read', false);
+    return (rows as List).length;
+  }
+
+  /// Mark a single notification as read (by its numeric id)
+  Future<void> markNotificationRead(int notificationId) async {
+    await supabase
+        .from('timetable_notifications')
+        .update({'read': true})
+        .eq('id', notificationId);
+  }
+
+  /// Mark all notifications for the current user as read
+  Future<void> markAllNotificationsRead() async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    await supabase
+        .from('timetable_notifications')
+        .update({'read': true})
+        .eq('recipient_id', user.uid)
+        .eq('read', false);
+  }
+
+  /// Save an FCM device token onto the user's row (as an array in `fcm_tokens` JSONB field).
+  /// This function will create or append to an array at users.fcm_tokens.
+  Future<void> saveDeviceToken(String token) async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    // Read existing tokens (if your users table doesn't have `fcm_tokens`, this still works)
+    final row = await supabase
+        .from('users')
+        .select('fcm_tokens')
+        .eq('id', user.uid)
+        .maybeSingle();
+
+    List<dynamic> tokens = [];
+    if (row != null && row['fcm_tokens'] != null) {
+      final existing = row['fcm_tokens'];
+      if (existing is List)
+        tokens = existing;
+      else if (existing is String) {
+        try {
+          tokens = jsonDecode(existing) as List<dynamic>;
+        } catch (_) {
+          tokens = [];
+        }
+      }
+    }
+
+    if (!tokens.contains(token)) {
+      tokens.add(token);
+      await supabase
+          .from('users')
+          .update({'fcm_tokens': tokens})
+          .eq('id', user.uid);
+    }
+  }
+
+  /// Remove an FCM device token from the user's row.
+  Future<void> removeDeviceToken(String token) async {
+    final fb_auth.User? user = fb_auth.FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final row = await supabase
+        .from('users')
+        .select('fcm_tokens')
+        .eq('id', user.uid)
+        .maybeSingle();
+
+    if (row == null || row['fcm_tokens'] == null) return;
+
+    List<dynamic> tokens;
+    final existing = row['fcm_tokens'];
+    if (existing is List)
+      tokens = List<dynamic>.from(existing);
+    else {
+      try {
+        tokens = List<dynamic>.from(jsonDecode(existing));
+      } catch (_) {
+        tokens = [];
+      }
+    }
+
+    tokens.removeWhere((t) => t == token);
+    await supabase
+        .from('users')
+        .update({'fcm_tokens': tokens})
+        .eq('id', user.uid);
   }
 
   // ===========================================================================

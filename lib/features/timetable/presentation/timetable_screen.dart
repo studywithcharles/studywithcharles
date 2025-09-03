@@ -1,6 +1,7 @@
 // lib/features/timetable/presentation/timetable_screen.dart
 
 import 'dart:ui';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
@@ -25,6 +26,10 @@ class _TimetableScreenState extends State<TimetableScreen> {
   bool _isPremium = false;
   List<Map<String, dynamic>> _addedTimetables = []; // shared users
   String? _currentUserId;
+  List<Map<String, dynamic>> _notifications = [];
+  int _unreadCount = 0;
+  bool _notifLoading = false;
+  Timer? _notifTimer;
 
   @override
   void initState() {
@@ -36,6 +41,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
     );
     _currentUserId = AuthService.instance.currentUser?.uid;
     _initAll();
+    _initNotifications();
   }
 
   // Helper: returns true if the id looks like a synthetic expanded occurrence (e.g. "<uuid>_r3")
@@ -63,6 +69,14 @@ class _TimetableScreenState extends State<TimetableScreen> {
     await _loadMyCode();
     await _loadSharedUsers();
     await _loadEvents();
+  }
+
+  @override
+  void dispose() {
+    try {
+      _notifTimer?.cancel();
+    } catch (_) {}
+    super.dispose();
   }
 
   // ---------- DATA LOADING ----------
@@ -131,6 +145,248 @@ class _TimetableScreenState extends State<TimetableScreen> {
         );
       }
     }
+  }
+
+  Future<void> _initNotifications() async {
+    // initial fetch of both list & unread count
+    await _fetchNotificationsAndCount();
+
+    // Periodic refresh: every 10 seconds (simple and reliable).
+    // You can increase the interval if you want less frequent polling.
+    _notifTimer = Timer.periodic(const Duration(seconds: 10), (_) async {
+      try {
+        await _fetchUnreadCount();
+      } catch (_) {}
+    });
+
+    // OPTIONAL: register device token for push (uncomment if using firebase_messaging)
+    // await _registerForPush();
+  }
+
+  Future<void> _fetchNotificationsAndCount() async {
+    try {
+      setState(() => _notifLoading = true);
+      final list = await SupabaseService.instance.fetchNotifications(
+        limit: 100,
+      );
+      final unread = await SupabaseService.instance.fetchUnreadCount();
+      if (!mounted) return;
+      setState(() {
+        _notifications = list;
+        _unreadCount = unread;
+        _notifLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _notifLoading = false;
+      });
+      debugPrint('[notif] fetch failed: $e');
+    }
+  }
+
+  Future<void> _fetchUnreadCount() async {
+    try {
+      final unread = await SupabaseService.instance.fetchUnreadCount();
+      if (!mounted) return;
+      setState(() => _unreadCount = unread);
+    } catch (e) {
+      debugPrint('[notif] unread count failed: $e');
+    }
+  }
+
+  Future<void> _markNotificationRead(int id) async {
+    try {
+      await SupabaseService.instance.markNotificationRead(id);
+      // optimistic update
+      final idx = _notifications.indexWhere((n) => n['id'] == id);
+      if (idx != -1 && mounted) {
+        setState(() {
+          _notifications[idx]['read'] = true;
+          if (_unreadCount > 0) _unreadCount--;
+        });
+      } else {
+        // fallback: refresh
+        await _fetchNotificationsAndCount();
+      }
+    } catch (e) {
+      debugPrint('[notif] mark read failed: $e');
+    }
+  }
+
+  Future<void> _markAllNotificationsRead() async {
+    try {
+      await SupabaseService.instance.markAllNotificationsRead();
+      await _fetchNotificationsAndCount();
+    } catch (e) {
+      debugPrint('[notif] mark all read failed: $e');
+    }
+  }
+
+  // OPTIONAL: register for FCM and save token to users.fcm_tokens via SupabaseService.saveDeviceToken
+  // Uncomment when you add firebase_messaging and configure Android/iOS as required by Firebase.
+  /*
+  Future<void> _registerForPush() async {
+    try {
+      final messaging = FirebaseMessaging.instance;
+      NotificationSettings settings = await messaging.requestPermission(
+        alert: true, badge: true, sound: true,
+      );
+      if (settings.authorizationStatus == AuthorizationStatus.authorized ||
+          settings.authorizationStatus == AuthorizationStatus.provisional) {
+        final token = await messaging.getToken();
+        if (token != null) {
+          await SupabaseService.instance.saveDeviceToken(token);
+          debugPrint('FCM token saved: $token');
+        }
+      }
+    } catch (e) {
+      debugPrint('[push] register failed: $e');
+    }
+  }
+  */
+
+  // ---------- Notifications modal ----------
+  Future<void> _openNotificationsModal() async {
+    // Ensure latest notifications are loaded before opening
+    await _fetchNotificationsAndCount();
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
+          child: GlassContainer(
+            borderRadius: 20.0,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            child: SizedBox(
+              height: MediaQuery.of(context).size.height * 0.75,
+              child: Column(
+                children: [
+                  _buildDragHandle(),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Notifications',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: _markAllNotificationsRead,
+                          child: const Text('Mark all read'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(color: Colors.white24, height: 1),
+                  Expanded(
+                    child: _notifLoading
+                        ? const Center(child: CircularProgressIndicator())
+                        : _notifications.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No notifications',
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.all(8),
+                            itemCount: _notifications.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(color: Colors.white10),
+                            itemBuilder: (ctx, i) {
+                              final n = _notifications[i];
+                              final actor =
+                                  (n['actor_username'] as String?) ??
+                                  (n['actor_id'] as String? ?? 'Someone');
+                              final avatar = n['actor_avatar_url'] as String?;
+                              final action =
+                                  (n['action'] as String?) ?? 'did something';
+                              final created = n['created_at'] != null
+                                  ? DateTime.parse(n['created_at']).toLocal()
+                                  : null;
+                              final read = (n['read'] == true);
+
+                              String title = '@$actor ';
+                              if (action == 'created')
+                                title += 'created an event';
+                              else if (action == 'updated')
+                                title += 'updated an event';
+                              else if (action == 'deleted')
+                                title += 'deleted an event';
+                              else
+                                title += action;
+
+                              return ListTile(
+                                leading: avatar != null
+                                    ? CircleAvatar(
+                                        backgroundImage: NetworkImage(avatar),
+                                      )
+                                    : const CircleAvatar(
+                                        child: Icon(Icons.person),
+                                      ),
+                                title: Text(
+                                  title,
+                                  style: TextStyle(
+                                    color: read ? Colors.white70 : Colors.white,
+                                    fontWeight: read
+                                        ? FontWeight.normal
+                                        : FontWeight.bold,
+                                  ),
+                                ),
+                                subtitle: created != null
+                                    ? Text(
+                                        DateFormat.yMMMd().add_jm().format(
+                                          created,
+                                        ),
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 12,
+                                        ),
+                                      )
+                                    : null,
+                                trailing: read
+                                    ? null
+                                    : IconButton(
+                                        icon: const Icon(
+                                          Icons.mark_email_read,
+                                          color: Colors.cyanAccent,
+                                        ),
+                                        onPressed: () {
+                                          final id = n['id'] as int?;
+                                          if (id != null)
+                                            _markNotificationRead(id);
+                                        },
+                                      ),
+                                onTap: () async {
+                                  final id = n['id'] as int?;
+                                  if (id != null)
+                                    await _markNotificationRead(id);
+                                  // optionally navigate to the event or close modal
+                                  Navigator.of(context).pop();
+                                },
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   /// Loads events and organizes them into a Map keyed by local date (midnight).
@@ -2035,10 +2291,48 @@ class _TimetableScreenState extends State<TimetableScreen> {
           ),
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.notifications_none, color: Colors.white),
-            onPressed: () {},
+          // ---------- notifications bell with badge ----------
+          Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: IconButton(
+              onPressed: () async {
+                // refresh then open modal
+                await _fetchNotificationsAndCount();
+                await _openNotificationsModal();
+              },
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(Icons.notifications_none, color: Colors.white),
+                  if (_unreadCount > 0)
+                    Positioned(
+                      right: -2,
+                      top: -2,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.redAccent,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          _unreadCount > 99 ? '99+' : '$_unreadCount',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
+
+          // existing menu button (unchanged)
           IconButton(
             icon: const Icon(Icons.menu, color: Colors.white),
             onPressed: _openHamburger,
