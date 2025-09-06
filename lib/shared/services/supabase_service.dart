@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import 'dart:math'; // Needed for random colors
 import 'package:flutter/material.dart'; // Needed for Color class
@@ -9,6 +10,8 @@ import 'package:firebase_auth/firebase_auth.dart' as fb_auth;
 class SupabaseService {
   SupabaseService._();
   static final SupabaseService instance = SupabaseService._();
+  final String _verifyFunctionUrl =
+      'https://stgykupephpnlshzvfwn.supabase.co/functions/v1/verify-transaction';
   final SupabaseClient supabase = Supabase.instance.client;
   final Uuid uuid = const Uuid();
 
@@ -826,5 +829,25 @@ class SupabaseService {
       throw Exception('Authorization URL not found in response.');
     }
     return authUrl as String;
+  }
+
+  // full function to verify a paystack reference server-side
+  Future<Map<String, dynamic>> verifyTransaction(String reference) async {
+    final resp = await http.post(
+      Uri.parse(_verifyFunctionUrl),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'reference': reference}),
+    );
+
+    if (resp.statusCode >= 200 && resp.statusCode < 300) {
+      return jsonDecode(resp.body) as Map<String, dynamic>;
+    } else {
+      // return the error body or throw if you prefer
+      try {
+        return jsonDecode(resp.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw Exception('Verify request failed: ${resp.statusCode}');
+      }
+    }
   }
 }
