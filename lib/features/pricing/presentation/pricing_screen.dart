@@ -18,6 +18,7 @@ class _PricingScreenState extends State<PricingScreen> {
   bool _isLoading = true;
   bool _isProcessingPayment = false;
   String _email = '';
+  bool _isCancelling = false;
 
   @override
   void initState() {
@@ -68,18 +69,45 @@ class _PricingScreenState extends State<PricingScreen> {
       );
 
       if (result == true) {
-        // --- THIS IS THE NEW LOGIC ---
-        // 1. Mark the user as premium in the database
-        await SupabaseService.instance.markUserAsPremium();
-        // 2. Add a small delay for stability
-        await Future.delayed(const Duration(milliseconds: 200));
-        if (!mounted) return;
-        // 3. Navigate to the success screen
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (context) => const PaymentSuccessScreen()),
-          (route) => false,
-        );
-        // -----------------------------
+        // IMPORTANT: verify server-side (do not trust client-only)
+        try {
+          final verifyRes = await SupabaseService.instance.verifyTransaction(
+            reference,
+          );
+
+          // verify function should return { ok: true, data: tx } on success
+          if (verifyRes['ok'] == true) {
+            // success -> navigate to success screen (server already persisted and marked premium)
+            if (!mounted) return;
+            Navigator.of(context).pushAndRemoveUntil(
+              MaterialPageRoute(
+                builder: (context) => const PaymentSuccessScreen(),
+              ),
+              (route) => false,
+            );
+          } else {
+            // verification failed/pending: show friendly error
+            final reason =
+                verifyRes['error'] ??
+                verifyRes['reason'] ??
+                verifyRes.toString();
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Payment verification failed: $reason'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Verification error: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       } else {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -98,9 +126,105 @@ class _PricingScreenState extends State<PricingScreen> {
         ),
       );
     } finally {
-      if (mounted) {
-        setState(() => _isProcessingPayment = false);
+      if (mounted) setState(() => _isProcessingPayment = false);
+    }
+  }
+
+  Future<void> _handleCancelSubscription() async {
+    final user = AuthService.instance.currentUser;
+    if (user == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please sign in to manage subscriptions.'),
+        ),
+      );
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel subscription'),
+        content: const Text(
+          'Are you sure you want to cancel your subscription? This will stop future recurring charges.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Yes, cancel'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _isCancelling = true);
+
+    try {
+      // 1) fetch profile to get subscription code
+      final profile = await SupabaseService.instance.fetchUserProfile(user.uid);
+      final subscriptionCode = (profile['current_subscription_code'] as String?)
+          ?.trim();
+
+      if (subscriptionCode == null || subscriptionCode.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No active subscription found for your account.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
       }
+
+      // 2) call cancel edge function
+      final functionUrl =
+          'https://stgykupephpnlshzvfwn.supabase.co/functions/v1/cancel-subscription';
+      final result = await SupabaseService.instance
+          .cancelSubscriptionServerSide(
+            subscriptionCode: subscriptionCode,
+            userId: user.uid,
+            functionUrl: functionUrl,
+          );
+
+      // 3) handle response
+      if (result['ok'] == true) {
+        if (!mounted) return;
+        // reflect UI and reload profile
+        await _loadUserData();
+        setState(() => _isPremium = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Subscription cancelled successfully.'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        final reason =
+            result['error'] ?? result['disabled'] ?? result.toString();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Cancel failed: $reason'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error cancelling subscription: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isCancelling = false);
     }
   }
 
@@ -183,7 +307,6 @@ class _PricingScreenState extends State<PricingScreen> {
     List<String> features,
     bool isPaid,
   ) {
-    // This widget does not need changes
     final bool isPlusPlan = isPaid;
     final bool canPurchase = isPlusPlan && !_isPremium;
 
@@ -235,36 +358,67 @@ class _PricingScreenState extends State<PricingScreen> {
               ),
             ),
           const SizedBox(height: 24),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: canPurchase
-                    ? Colors.cyanAccent
-                    : Colors.white24,
-                padding: const EdgeInsets.symmetric(vertical: 16),
+          // Primary purchase/subscribed button + optional Cancel button below
+          Column(
+            children: [
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: canPurchase
+                        ? Colors.cyanAccent
+                        : Colors.white24,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                  onPressed: canPurchase ? _handlePayment : null,
+                  child: _isProcessingPayment && isPlusPlan
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.black,
+                          ),
+                        )
+                      : Text(
+                          isPlusPlan
+                              ? (_isPremium ? 'Subscribed' : 'Get Plus')
+                              : 'Current Plan',
+                          style: TextStyle(
+                            color: canPurchase ? Colors.black : Colors.white70,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                ),
               ),
-              onPressed: canPurchase ? _handlePayment : null,
-              child: _isProcessingPayment && isPlusPlan
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.black,
-                      ),
-                    )
-                  : Text(
-                      isPlusPlan
-                          ? (_isPremium ? 'Subscribed' : 'Get Plus')
-                          : 'Current Plan',
-                      style: TextStyle(
-                        color: canPurchase ? Colors.black : Colors.white70,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
+              const SizedBox(height: 8),
+              // Show Cancel subscription only when user is premium and this is the paid plan
+              if (isPlusPlan && _isPremium)
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: _isCancelling ? null : _handleCancelSubscription,
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.white10),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
                     ),
-            ),
+                    child: _isCancelling
+                        ? const SizedBox(
+                            height: 16,
+                            width: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text(
+                            'Cancel subscription',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                  ),
+                ),
+            ],
           ),
         ],
       ),

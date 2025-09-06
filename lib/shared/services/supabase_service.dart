@@ -850,4 +850,33 @@ class SupabaseService {
       }
     }
   }
+
+  /// Calls the server-side Supabase Edge Function to cancel a Paystack subscription and
+  /// returns the decoded JSON response (map). Provide the functionUrl you deployed.
+  Future<Map<String, dynamic>> cancelSubscriptionServerSide({
+    required String subscriptionCode,
+    required String userId,
+    required String functionUrl,
+  }) async {
+    final resp = await http.post(
+      Uri.parse(functionUrl),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'subscription_code': subscriptionCode,
+        'user_id': userId,
+      }),
+    );
+
+    if (resp.statusCode >= 200 && resp.statusCode < 300) {
+      return jsonDecode(resp.body) as Map<String, dynamic>;
+    } else {
+      try {
+        return jsonDecode(resp.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw Exception(
+          'Cancel request failed: ${resp.statusCode} ${resp.body}',
+        );
+      }
+    }
+  }
 }
