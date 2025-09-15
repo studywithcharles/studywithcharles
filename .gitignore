@@ -49,3 +49,4 @@ app.*.map.json
 
 # Environment
 .env
+key.properties

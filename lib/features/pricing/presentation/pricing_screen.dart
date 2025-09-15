@@ -130,6 +130,61 @@ class _PricingScreenState extends State<PricingScreen> {
     }
   }
 
+  /// Branded confirmation dialog for cancelling subscription.
+  /// Returns true when user confirms, false otherwise.
+  Future<bool> _showBrandConfirmCancelDialog() async {
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF0F0F10), // almost-black to match app
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          title: const Text(
+            'Cancel subscription',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+          content: const Text(
+            'Are you sure you want to cancel your subscription? This will stop future recurring charges.',
+            style: TextStyle(color: Colors.white70),
+          ),
+          actionsPadding: const EdgeInsets.symmetric(
+            horizontal: 12,
+            vertical: 8,
+          ),
+          actions: [
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.white70),
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('No, keep it'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFE53935), // prominent red
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 12,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text(
+                'Yes, cancel',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result == true;
+  }
+
   Future<void> _handleCancelSubscription() async {
     final user = AuthService.instance.currentUser;
     if (user == null) {
@@ -142,27 +197,11 @@ class _PricingScreenState extends State<PricingScreen> {
       return;
     }
 
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Cancel subscription'),
-        content: const Text(
-          'Are you sure you want to cancel your subscription? This will stop future recurring charges.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('No'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Yes, cancel'),
-          ),
-        ],
-      ),
-    );
-    if (confirm != true) return;
+    // Branded confirm dialog
+    final confirm = await _showBrandConfirmCancelDialog();
+    if (!confirm) return;
 
+    if (!mounted) return;
     setState(() => _isCancelling = true);
 
     try {
@@ -236,6 +275,10 @@ class _PricingScreenState extends State<PricingScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         elevation: 0,
+        shadowColor: Colors.transparent,
+        surfaceTintColor: Colors.transparent, // prevents Material3 tinting
+        scrolledUnderElevation:
+            0, // harmless on older SDKs, prevents scrolled tint on newer
         automaticallyImplyLeading: false,
         title: const Text(
           'Pricing',
@@ -247,6 +290,7 @@ class _PricingScreenState extends State<PricingScreen> {
           ),
         ),
       ),
+
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : Padding(
@@ -358,7 +402,6 @@ class _PricingScreenState extends State<PricingScreen> {
               ),
             ),
           const SizedBox(height: 24),
-          // Primary purchase/subscribed button + optional Cancel button below
           Column(
             children: [
               SizedBox(
@@ -393,29 +436,39 @@ class _PricingScreenState extends State<PricingScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              // Show Cancel subscription only when user is premium and this is the paid plan
+              // Show a prominent red cancel button only when the user is premium and viewing the paid plan
               if (isPlusPlan && _isPremium)
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton(
-                    onPressed: _isCancelling ? null : _handleCancelSubscription,
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.white10),
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
-                    child: _isCancelling
-                        ? const SizedBox(
-                            height: 16,
-                            width: 16,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: _isCancelling
+                          ? null
+                          : _handleCancelSubscription,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFE53935), // rich red
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        elevation: 2,
+                      ),
+                      child: _isCancelling
+                          ? const SizedBox(
+                              height: 16,
+                              width: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text(
+                              'Cancel subscription',
+                              style: TextStyle(fontWeight: FontWeight.bold),
                             ),
-                          )
-                        : const Text(
-                            'Cancel subscription',
-                            style: TextStyle(color: Colors.white),
-                          ),
+                    ),
                   ),
                 ),
             ],

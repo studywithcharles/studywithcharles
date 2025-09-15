@@ -1,0 +1,78 @@
+import java.util.Properties
+import java.io.FileInputStream
+
+pluginManagement {
+    // Compute flutterSdkPath inside pluginManagement block
+    val flutterSdkPath: String = run {
+        val properties = Properties()
+        val localPropertiesFile = file("local.properties")
+        if (localPropertiesFile.exists()) {
+            properties.load(FileInputStream(localPropertiesFile))
+        }
+        val sdkFromProps = properties.getProperty("flutter.sdk")
+        val sdkFromEnv = System.getenv("FLUTTER_ROOT") ?: System.getenv("FLUTTER_HOME")
+        val flutterSdk = sdkFromProps ?: sdkFromEnv
+        require(flutterSdk != null) {
+            "flutter.sdk not set in local.properties and FLUTTER_ROOT/FLUTTER_HOME not set in environment"
+        }
+        flutterSdk
+    }
+
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+
+    // Include the Flutter gradle plugin from the local Flutter SDK
+    includeBuild(File(flutterSdkPath, "packages/flutter_tools/gradle"))
+
+    resolutionStrategy {
+        eachPlugin {
+            if (requested.id.id.startsWith("com.android")) {
+                useModule("com.android.tools.build:gradle:${requested.version}")
+            }
+            if (requested.id.id.startsWith("org.jetbrains.kotlin")) {
+                useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:${requested.version}")
+            }
+        }
+    }
+}
+
+plugins {
+    id("com.android.application") version "8.7.3" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.0" apply false
+    // dev.flutter.flutter-gradle-plugin applied in app module
+}
+
+include(":app")
+
+dependencyResolutionManagement {
+    // Recompute flutterSdkPath here since it's in a different scope
+    val flutterSdkPath: String = run {
+        val properties = Properties()
+        val localPropertiesFile = file("local.properties")
+        if (localPropertiesFile.exists()) {
+            properties.load(FileInputStream(localPropertiesFile))
+        }
+        val sdkFromProps = properties.getProperty("flutter.sdk")
+        val sdkFromEnv = System.getenv("FLUTTER_ROOT") ?: System.getenv("FLUTTER_HOME")
+        val flutterSdk = sdkFromProps ?: sdkFromEnv
+        require(flutterSdk != null) {
+            "flutter.sdk not set in local.properties and FLUTTER_ROOT/FLUTTER_HOME not set in environment"
+        }
+        flutterSdk
+    }
+    
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        // flutter artifact repo (prebuilt AARs produced by flutter tool)
+        maven { url = uri("https://storage.googleapis.com/download.flutter.io") }
+        google()
+        mavenCentral()
+        // optionally add mirrors
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/central") }
+        maven { url = uri("$flutterSdkPath/.android/Flutter/ephemeral") }
+    }
+}
