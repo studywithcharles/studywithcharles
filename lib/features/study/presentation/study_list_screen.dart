@@ -955,10 +955,14 @@ class _StudyListScreenState extends State<StudyListScreen>
     });
   }
 
+  // REPLACE the old _sendMessageHandler in study_list_screen.dart WITH THIS
   Future<void> _sendMessageHandler(String text) async {
     final promptText = text.trim();
-    if (promptText.isEmpty) {
-      _showGlassSnackBar('Please enter a message.', isError: true);
+    if (promptText.isEmpty && _sessionAttachmentUrls.isEmpty) {
+      _showGlassSnackBar(
+        'Please enter a message or add an attachment.',
+        isError: true,
+      );
       return;
     }
 
@@ -970,7 +974,9 @@ class _StudyListScreenState extends State<StudyListScreen>
       for (final url in attachmentsForThisMessage) {
         _messages.add({'role': 'user', 'text': url, 'type': 'image'});
       }
-      _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
+      if (promptText.isNotEmpty) {
+        _messages.add({'role': 'user', 'text': promptText, 'type': 'text'});
+      }
       _messages.add({'role': 'assistant', 'text': '', 'type': 'typing'});
       _msgCtrl.clear();
       _sessionAttachmentUrls.clear();
@@ -982,7 +988,9 @@ class _StudyListScreenState extends State<StudyListScreen>
       final String functionName = wasDiagramMode ? 'image-proxy' : 'text-proxy';
       final String aiResponseType = wasDiagramMode ? 'image' : 'text';
 
-      // Build a small, safe chat_history payload (no 'typing' and only last N)
+      // --- THIS IS THE FIX ---
+      // Build the FULL payload that both functions expect
+
       List<Map<String, String>> chatHistoryPayload = _messages
           .where((m) => (m['type'] ?? 'text') != 'typing')
           .map(
@@ -1000,36 +1008,31 @@ class _StudyListScreenState extends State<StudyListScreen>
         );
       }
 
-      final Map<String, dynamic> payload;
-      if (wasDiagramMode) {
-        payload = {'prompt': promptText};
-      } else {
-        payload = {
-          'prompt': promptText,
-          'chat_history': chatHistoryPayload,
-          'attachments': {
-            'session': attachmentsForThisMessage,
-            'context': _permanentAttachmentUrls,
-          },
+      final Map<String, dynamic> payload = {
+        'prompt': promptText,
+        'chat_history': chatHistoryPayload,
+        'attachments': {
+          'session': attachmentsForThisMessage,
+          'context': _permanentAttachmentUrls,
+        },
+        'title': _titleCtl.text.trim(),
+        'context_rules': {
           'title': _titleCtl.text.trim(),
-        };
-      }
+          'result_format': wasDiagramMode ? 'Generate Diagram' : 'Summarize',
+          'more_context': wasDiagramMode
+              ? 'Create a visual diagram for this prompt'
+              : null,
+        },
+      };
 
-      // Debug: print payload size
-      try {
-        final int payloadBytes = utf8.encode(jsonEncode(payload)).length;
-        // ignore: avoid_print
-        print('[AI] payload size: $payloadBytes bytes');
-      } catch (_) {}
+      // --- END OF FIX ---
 
-      // Invoke function with a client-side timeout
       final response = await Supabase.instance.client.functions
           .invoke(functionName, body: payload)
           .timeout(
-            const Duration(seconds: 20),
-            onTimeout: () => throw Exception(
-              'AI service timed out. Try again or shorten the conversation history.',
-            ),
+            const Duration(seconds: 60), // Increased timeout for image gen
+            onTimeout: () =>
+                throw Exception('AI service timed out. Please try again.'),
           );
 
       if (response.status != 200) {
@@ -1054,7 +1057,6 @@ class _StudyListScreenState extends State<StudyListScreen>
       });
       _scrollToBottom();
 
-      // Auto-save if the card is already saved
       if (_currentContextId != null) {
         await SupabaseService.instance.saveCard(
           contextId: _currentContextId!,
@@ -1063,7 +1065,6 @@ class _StudyListScreenState extends State<StudyListScreen>
       }
     } catch (e) {
       if (!mounted) return;
-      // ensure typing indicator removed
       if (_messages.isNotEmpty && (_messages.last['type'] == 'typing')) {
         setState(() => _messages.removeLast());
       }
@@ -1336,6 +1337,7 @@ class _StudyListScreenState extends State<StudyListScreen>
   }
 
   /// 2) Chat bubble builder: now includes a typing indicator
+  // REPLACE your old _buildCardContent function WITH THIS
   Widget _buildCardContent() {
     if (_messages.isEmpty) {
       return const Center(
@@ -1364,22 +1366,48 @@ class _StudyListScreenState extends State<StudyListScreen>
           );
         }
 
-        Widget content = type == 'image'
-            ? ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.network(
-                  text,
-                  loadingBuilder: (c, child, prog) => prog == null
-                      ? child
-                      : const Center(child: CircularProgressIndicator()),
-                  errorBuilder: (c, _, __) =>
-                      const Icon(Icons.error_outline, color: Colors.redAccent),
-                ),
-              )
-            : SelectableText(
+        // --- THIS IS THE FINAL IMAGE DISPLAY FIX ---
+        Widget content;
+        if (type == 'image') {
+          // Check if the text is a URL or base64 data
+          if (text.startsWith('http')) {
+            // It's a URL from an attachment
+            content = ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.network(
                 text,
-                style: TextStyle(color: isUser ? Colors.black : Colors.white),
+                loadingBuilder: (c, child, prog) => prog == null
+                    ? child
+                    : const Center(child: CircularProgressIndicator()),
+                errorBuilder: (c, _, __) =>
+                    const Icon(Icons.error_outline, color: Colors.redAccent),
+              ),
+            );
+          } else {
+            // It's base64 data from our new image-proxy
+            try {
+              final imageBytes = base64Decode(text);
+              content = ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.memory(imageBytes),
               );
+            } catch (e) {
+              // If decoding fails, show a broken image icon
+              content = const Icon(
+                Icons.broken_image,
+                color: Colors.redAccent,
+                size: 40,
+              );
+            }
+          }
+        } else {
+          // It's a normal text message
+          content = SelectableText(
+            text,
+            style: TextStyle(color: isUser ? Colors.black : Colors.white),
+          );
+        }
+        // --- END OF FIX ---
 
         return Column(
           crossAxisAlignment: isUser

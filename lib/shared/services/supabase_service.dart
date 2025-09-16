@@ -809,18 +809,30 @@ class SupabaseService {
   // ===========================================================================
   // == PAYMENTS
   // ===========================================================================
-  /// Creates a Paystack payment initialization and returns the authorization URL.
+  // REPLACE THE OLD FUNCTION IN supabase_service.dart WITH THIS
   Future<String> initializePaystackTransaction(
-    int amount,
+    String planCode, // We send the plan code
+    String tierName, // We send 'plus' or 'pro'
     String email,
     String reference,
+    String userId, // We send the user's ID
   ) async {
     final response = await supabase.functions.invoke(
-      'initialize-payment',
-      body: {'amount': amount, 'email': email, 'reference': reference},
+      'init-payment-v2', // This calls your new, clean backend function
+      body: {
+        'plan_code': planCode,
+        'email': email,
+        'reference': reference,
+        'metadata': {
+          // This data is passed to your verify function
+          'user_id': userId,
+          'tier': tierName,
+        },
+      },
     );
 
     if (response.status != 200 || response.data == null) {
+      // This will show the real error from your backend
       throw Exception('Failed to initialize payment: ${response.data}');
     }
 
