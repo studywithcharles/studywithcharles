@@ -1,20 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-  -->
+  <!-- If serving from a subpath change the base href; Flutter will replace $FLUTTER_BASE_HREF at build time -->
   <base href="$FLUTTER_BASE_HREF">
 
   <meta charset="UTF-8">
-  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="description" content="Study With Charles - Your AI-powered study companion.">
 
   <!-- PWA theme color -->
@@ -24,28 +15,21 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="StudyWithCharles">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="icons/Icon-192.png">
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="icons/logo.png"/>
-
+  <!-- Favicon (tab) -->
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/Icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="icons/Icon-512.png" />
 
   <title>Study With Charles</title>
 
   <!-- Manifest for PWA -->
   <link rel="manifest" href="manifest.json">
+
+  <!-- Recommended: let Flutter bootstrap the service worker and runtime -->
+  <script src="flutter_bootstrap.js" async></script>
 </head>
 <body>
-  <!-- Flutter entry point -->
-  <script src="flutter_bootstrap.js" async></script>
-
-  <!-- Register Service Worker -->
-  <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', function () {
-        navigator.serviceWorker.register('flutter_service_worker.js');
-      });
-    }
-  </script>
+  <!-- Flutter will mount the app -->
 </body>
 </html>
