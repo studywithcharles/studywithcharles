@@ -11,7 +11,7 @@ class SupabaseService {
   SupabaseService._();
   static final SupabaseService instance = SupabaseService._();
   final String _verifyFunctionUrl =
-      'https://stgykupephpnlshzvfwn.supabase.co/functions/v1/verify-transaction';
+      'https://stgykupephpnlshzvfwn.supabase.co/functions/v1/verify-transaction-v2';
   final SupabaseClient supabase = Supabase.instance.client;
   final Uuid uuid = const Uuid();
 
