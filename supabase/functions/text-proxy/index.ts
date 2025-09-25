@@ -20,6 +20,24 @@ function abortableFetch(url: string, opts: RequestInit = {}, timeoutMs = 5000) {
   return fetch(url, combined).finally(() => clearTimeout(id));
 }
 
+// Function to clean markdown formatting from AI responses
+function cleanAIResponse(text: string): string {
+  return text
+    // Remove bold formatting (**text**)
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    // Remove italic formatting (*text*)
+    .replace(/(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)/g, '$1')
+    // Remove markdown headers (# ## ### etc.)
+    .replace(/^#{1,6}\s+/gm, '')
+    // Remove bullet point asterisks at start of lines
+    .replace(/^\s*\*\s+/gm, '• ')
+    // Clean up multiple spaces and normalize whitespace
+    .replace(/\s+/g, ' ')
+    // Remove trailing spaces and normalize line breaks
+    .replace(/[ \t]+$/gm, '')
+    .trim();
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -47,9 +65,9 @@ serve(async (req) => {
 
     let systemInstructionText: string;
     if ((trimmedHistory || []).length === 0) {
-      systemInstructionText = `You are an expert study assistant. Your primary goal is to help the user understand material. If a course title is provided, such as "${title}", tailor your expertise to that subject. Analyze all provided context, images, and the entire chat history to give the best possible answer.`;
+      systemInstructionText = `You are an expert study assistant. Your primary goal is to help the user understand material. If a course title is provided, such as "${title}", tailor your expertise to that subject. Analyze all provided context, images, and the entire chat history to give the best possible answer. Please provide clear, educational explanations in plain text format without using markdown formatting, asterisks for emphasis, or special characters. Use simple, readable text only.`;
     } else {
-      systemInstructionText = 'You are an expert study assistant. Continue the conversation helpfully.';
+      systemInstructionText = 'You are an expert study assistant. Continue the conversation helpfully. Provide responses in plain text format without markdown formatting or asterisks.';
     }
 
     const formattedHistory = trimmedHistory.map((msg: any) => ({
@@ -87,6 +105,11 @@ serve(async (req) => {
         ...formattedHistory,
         { role: 'user', parts: userMessageParts },
       ],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 2048,
+        candidateCount: 1,
+      },
     };
 
     // Guard: avoid sending gigantic payloads
@@ -125,9 +148,12 @@ serve(async (req) => {
     }
 
     const data = await res.json();
-    const aiText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate a response.';
+    const rawAIText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate a response.';
+    
+    // Clean the AI response to remove formatting artifacts
+    const cleanedAIText = cleanAIResponse(rawAIText);
 
-    return new Response(JSON.stringify({ response: aiText }), {
+    return new Response(JSON.stringify({ response: cleanedAIText }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 200,
     });
