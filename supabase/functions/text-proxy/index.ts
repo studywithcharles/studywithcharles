@@ -5,7 +5,7 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { encodeBase64 } from 'https://deno.land/std@0.224.0/encoding/base64.ts';
 import { corsHeaders } from '../_shared/cors.ts';
 
-const API_KEY = Deno.env.get('GEMINI_API_KEY');
+const API_KEY = AIzaSyDulD4UdclW_216_qiiRwXDyOREP0DgVoc;
 const MODEL = 'gemini-1.5-flash-latest';
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${API_KEY}`;
 
