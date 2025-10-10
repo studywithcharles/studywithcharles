@@ -23,18 +23,24 @@ function abortableFetch(url: string, opts: RequestInit = {}, timeoutMs = 5000) {
 // Function to clean markdown formatting from AI responses
 function cleanAIResponse(text: string): string {
   return text
-    // Remove bold formatting (**text**)
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    // Remove italic formatting (*text*)
-    .replace(/(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)/g, '$1')
-    // Remove markdown headers (# ## ### etc.)
+    // Remove markdown headers (# ## ### etc.) - do this first
     .replace(/^#{1,6}\s+/gm, '')
-    // Remove bullet point asterisks at start of lines
+    // Remove bullet point asterisks at start of lines - before processing inline asterisks
     .replace(/^\s*\*\s+/gm, '• ')
+    // Remove bullet point dashes at start of lines
+    .replace(/^\s*-\s+/gm, '• ')
+    // Remove bold formatting (**text**) - process bold before italic
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    // Remove italic formatting (*text*) - now safe to remove single asterisks
+    .replace(/\*([^*]+?)\*/g, '$1')
+    // Remove any remaining stray asterisks
+    .replace(/\*/g, '')
     // Clean up multiple spaces and normalize whitespace
     .replace(/\s+/g, ' ')
-    // Remove trailing spaces and normalize line breaks
+    // Remove trailing spaces
     .replace(/[ \t]+$/gm, '')
+    // Normalize multiple line breaks to maximum of 2
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
@@ -65,7 +71,7 @@ serve(async (req) => {
 
     let systemInstructionText: string;
     if ((trimmedHistory || []).length === 0) {
-      systemInstructionText = `You are an expert study assistant called Charles. Your primary goal is to help scan and the user understand material. If a course title is provided, such as "${title}", tailor your expertise to that subject. Analyze all provided context, images, and the entire chat history to give the best possible answer for a University level student.Output clear, educational explanations in plain text format without using markdown formatting, asterisks for emphasis, or special characters. Use simple, readable text only.`;
+      systemInstructionText = `You are an expert study assistant called Charles. Your primary goal is to help scan and help the user understand material. If a course title is provided, such as "${title}", tailor your expertise to that subject. Analyze all provided context, images, and the entire chat history to give the best possible answer for a University level student. Output clear, educational explanations in plain text format without using markdown formatting, asterisks for emphasis, or special characters. Use simple, readable text only.`;
     } else {
       systemInstructionText = 'You are an expert study assistant called Charles. Continue the conversation with the User helpfully. Output responses in plain text format without markdown formatting or asterisks.';
     }
